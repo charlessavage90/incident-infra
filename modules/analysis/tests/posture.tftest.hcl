@@ -106,3 +106,28 @@ run "posture_rejects_invalid_values" {
 
   expect_failures = [var.posture]
 }
+
+# Interface endpoints bill per ENI: per endpoint, per AZ. The appliance is a
+# single instance pinned to subnet 0 by the data volume's AZ, so a second ENI
+# per endpoint doubles the largest active-cost line item for no availability gain.
+run "endpoints_occupy_one_az_only" {
+  command = plan
+
+  variables {
+    posture = "active"
+  }
+
+  assert {
+    condition = alltrue([
+      for e in aws_vpc_endpoint.interface : length(e.subnet_ids) == 1
+    ])
+    error_message = "Interface endpoints must sit in one AZ; a second ENI per endpoint is pure cost."
+  }
+
+  assert {
+    condition = alltrue([
+      for e in aws_vpc_endpoint.interface : tolist(e.subnet_ids)[0] == var.private_subnet_ids[0]
+    ])
+    error_message = "Endpoints must be in the same subnet as the appliance."
+  }
+}

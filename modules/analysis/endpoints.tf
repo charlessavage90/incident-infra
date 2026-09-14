@@ -51,10 +51,22 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_https" {
 resource "aws_vpc_endpoint" "interface" {
   for_each = local.interface_endpoint_services
 
-  vpc_id              = var.vpc_id
-  service_name        = "com.amazonaws.${data.aws_region.current.region}.${each.key}"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = var.private_subnet_ids
+  vpc_id            = var.vpc_id
+  service_name      = "com.amazonaws.${data.aws_region.current.region}.${each.key}"
+  vpc_endpoint_type = "Interface"
+
+  # One AZ, not both.
+  #
+  # Interface endpoints bill per ENI, meaning per endpoint per AZ. Spanning two
+  # subnets doubles the largest active-cost line item -- roughly $117/month
+  # instead of $58 at eight endpoints -- and buys nothing here: the appliance is
+  # a single instance in subnet 0, pinned there by the data volume's AZ. If that
+  # AZ fails the appliance is down regardless, so the second ENI adds cost
+  # without adding availability.
+  #
+  # Phase 3 should revisit this if the Batch fleet spans availability zones.
+  subnet_ids = [var.private_subnet_ids[0]]
+
   security_group_ids  = [aws_security_group.endpoints.id]
   private_dns_enabled = true
 
