@@ -1,4 +1,11 @@
-mock_provider "aws" {}
+mock_provider "aws" {
+  # mock_provider returns empty lists for data sources; the AZ lookup needs real values.
+  mock_data "aws_availability_zones" {
+    defaults = {
+      names = ["us-east-1a", "us-east-1b", "us-east-1c"]
+    }
+  }
+}
 mock_provider "random" {}
 
 variables {
