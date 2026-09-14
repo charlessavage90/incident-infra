@@ -203,3 +203,88 @@ run "az_mismatch_is_caught_before_apply" {
 
   expect_failures = [aws_instance.appliance]
 }
+
+# Without an explicit dependency the instance can boot into a VPC that has no
+# route to SSM, ECR, or Secrets Manager. cloud-init then fails and never runs
+# again, leaving a running instance with no Timesketch on it.
+run "appliance_waits_for_vpc_endpoints" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(aws_instance.appliance.user_data, "retry 10 dnf install")
+    error_message = "Package installation must retry; cloud-init runs once and a transient failure is unrecoverable."
+  }
+}
+
+# gunicorn opens /var/log/timesketch/wsgi_error.log at startup and exits if the
+# directory is missing, crash-looping the web container. Upstream mounts this
+# (TIMESKETCH_LOGS_PATH); omitting it was observed during Phase 1 acceptance.
+run "timesketch_logs_directory_is_mounted" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(local.docker_compose, "/mnt/data/logs:/var/log/timesketch")
+    error_message = "Timesketch needs its log directory mounted or gunicorn exits on startup."
+  }
+
+  assert {
+    condition     = strcontains(aws_instance.appliance.user_data, "/mnt/data/logs")
+    error_message = "cloud-init must create the logs directory on the data volume."
+  }
+}
+
+# set -x is on throughout cloud-init, so a generated password would otherwise be
+# written to /var/log/cloud-init-output.log in plaintext.
+run "responder_passwords_do_not_reach_the_cloud_init_log" {
+  command = plan
+  variables {
+    posture    = "active"
+    responders = ["alice"]
+  }
+
+  assert {
+    condition     = strcontains(aws_instance.appliance.user_data, "set +x")
+    error_message = "Tracing must be disabled around secret handling or passwords land in cloud-init logs."
+  }
+}
+
+# The reactivation path is the one that bites. On dormant -> active the instance
+# already exists, so only aws_ec2_instance_state changes; without an explicit
+# dependency Terraform starts it before the endpoints are back, the SSM agent
+# finds no route and hibernates for up to an hour.
+run "instance_state_waits_for_endpoints_on_reactivation" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = length(aws_vpc_endpoint.interface) == 8
+    error_message = "Activation must create the endpoints the instance start depends on."
+  }
+
+  assert {
+    condition     = aws_ec2_instance_state.appliance.state == "running"
+    error_message = "Active posture must run the appliance."
+  }
+}
+
+# Dormancy destroys the endpoints; activation recreates them. The SSM agent
+# starts before the new ENI forwards packets, hibernates, and backs off for up to
+# an hour. Terraform ordering does not fix it (the endpoint reports "available"
+# before it is usable), and cloud-init does not re-run on stop/start - so the
+# guard must be a systemd unit that fires on every boot.
+run "ssm_agent_recovers_on_every_reactivation" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(aws_instance.appliance.user_data, "ssm-endpoint-wait.service")
+    error_message = "A boot-time unit must restart the SSM agent once its endpoint is reachable, or reactivation can take an hour."
+  }
+
+  assert {
+    condition     = strcontains(aws_instance.appliance.user_data, "systemctl enable ssm-endpoint-wait.service")
+    error_message = "The unit must be enabled so it runs on stop/start, not just on first boot."
+  }
+}

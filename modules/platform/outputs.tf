@@ -74,3 +74,8 @@ output "name_prefix" {
   value       = var.name_prefix
   description = "Passed through so the analysis layer names resources consistently."
 }
+
+output "tooling_bucket" {
+  value       = aws_s3_bucket.tooling.bucket
+  description = "Mirrored tooling binaries. AL2023 has no Docker Compose package and this VPC has no internet."
+}

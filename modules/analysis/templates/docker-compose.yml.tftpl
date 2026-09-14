@@ -52,6 +52,11 @@ services:
     volumes:
       - /opt/timesketch/etc:/etc/timesketch
       - /mnt/data/upload:/usr/share/timesketch/upload
+      # gunicorn opens /var/log/timesketch/wsgi_error.log at startup and exits if
+      # the directory is missing. Upstream mounts this (TIMESKETCH_LOGS_PATH);
+      # omitting it crash-loops the web container. On the data volume so the
+      # record survives dormancy.
+      - /mnt/data/logs:/var/log/timesketch
     depends_on:
       - opensearch
       - postgres
@@ -66,6 +71,11 @@ services:
     volumes:
       - /opt/timesketch/etc:/etc/timesketch
       - /mnt/data/upload:/usr/share/timesketch/upload
+      # gunicorn opens /var/log/timesketch/wsgi_error.log at startup and exits if
+      # the directory is missing. Upstream mounts this (TIMESKETCH_LOGS_PATH);
+      # omitting it crash-loops the web container. On the data volume so the
+      # record survives dormancy.
+      - /mnt/data/logs:/var/log/timesketch
     depends_on:
       - opensearch
       - postgres

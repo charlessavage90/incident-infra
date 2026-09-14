@@ -1,8 +1,9 @@
 version: 0.2
 
-# Mirrors upstream container images into ECR and publishes each one's immutable
-# digest to SSM. The appliance and (from Phase 3) the plaso worker both consume
-# those digests, which is what makes the spec 4.5 version-parity invariant hold:
+# Mirrors upstream container images and tooling into this account, and publishes
+# each image's immutable digest to SSM. The appliance and (from Phase 3) the
+# plaso worker consume those digests, which is what makes the spec 4.5
+# version-parity invariant hold:
 #
 #   The plaso that produces a timeline and the plaso that ingests it are the
 #   same binary.
@@ -10,11 +11,18 @@ version: 0.2
 # Timesketch installs plaso-tools UNPINNED from ppa:gift, so two builds of the
 # same Timesketch release tag can contain different plaso versions. Pinning by
 # tag is therefore not sufficient; only a digest is.
+#
+# Sources are ECR Public rather than Docker Hub. Docker Hub rate-limits
+# anonymous pulls per IP, CodeBuild shares IPs, and a rate-limited mirror fails
+# exactly when someone is trying to stand the environment up. Observed during
+# Phase 1 acceptance.
 
 phases:
   pre_build:
     commands:
       - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      # ECR Public tokens are issued from us-east-1 regardless of build region.
+      - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
   build:
     commands:
       - |
@@ -22,20 +30,33 @@ phases:
 
         mirror() {
           repo_url="$1"; upstream="$2"; ssm_key="$3"
-          echo "== mirroring $upstream -> $repo_url:$IMAGE_TAG"
-
-          docker pull "$upstream"
-          docker tag "$upstream" "$repo_url:$IMAGE_TAG"
-          docker push "$repo_url:$IMAGE_TAG"
 
           # repository_url is <registry>/<prefix>/<name>; the ECR API wants
           # everything after the registry host.
           repo_name="${repo_url#*/}"
 
-          digest=$(aws ecr describe-images \
+          # Idempotent. Tags are IMMUTABLE, so re-pushing an existing tag fails,
+          # and re-running this build must be safe: it is how tooling gets added
+          # and how a partially failed run is recovered.
+          existing=$(aws ecr describe-images \
             --repository-name "$repo_name" \
             --image-ids imageTag="$IMAGE_TAG" \
-            --query 'imageDetails[0].imageDigest' --output text)
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+
+          if [ -n "$existing" ] && [ "$existing" != "None" ]; then
+            echo "== $ssm_key already mirrored at $IMAGE_TAG, skipping pull"
+            digest="$existing"
+          else
+            echo "== mirroring $upstream -> $repo_url:$IMAGE_TAG"
+            docker pull "$upstream"
+            docker tag "$upstream" "$repo_url:$IMAGE_TAG"
+            docker push "$repo_url:$IMAGE_TAG"
+
+            digest=$(aws ecr describe-images \
+              --repository-name "$repo_name" \
+              --image-ids imageTag="$IMAGE_TAG" \
+              --query 'imageDetails[0].imageDigest' --output text)
+          fi
 
           if [ -z "$digest" ] || [ "$digest" = "None" ]; then
             echo "FATAL: could not resolve a digest for $repo_name:$IMAGE_TAG" >&2
@@ -51,7 +72,37 @@ phases:
         }
 
         mirror "$ECR_TIMESKETCH" "us-docker.pkg.dev/osdfir-registry/timesketch/timesketch:$TIMESKETCH_VERSION" timesketch
-        mirror "$ECR_OPENSEARCH" "opensearchproject/opensearch:$OPENSEARCH_VERSION"                             opensearch
-        mirror "$ECR_POSTGRES"   "postgres:$POSTGRES_VERSION"                                                   postgres
-        mirror "$ECR_REDIS"      "redis:$REDIS_VERSION"                                                         redis
-        mirror "$ECR_NGINX"      "nginx:$NGINX_VERSION"                                                         nginx
+        mirror "$ECR_OPENSEARCH" "public.ecr.aws/opensearchproject/opensearch:$OPENSEARCH_VERSION"             opensearch
+        mirror "$ECR_POSTGRES"   "public.ecr.aws/docker/library/postgres:$POSTGRES_VERSION"                    postgres
+        mirror "$ECR_REDIS"      "public.ecr.aws/docker/library/redis:$REDIS_VERSION"                          redis
+        mirror "$ECR_NGINX"      "public.ecr.aws/docker/library/nginx:$NGINX_VERSION"                          nginx
+      - |
+        set -euo pipefail
+
+        # Amazon Linux 2023 ships no Docker Compose package and the appliance's
+        # VPC has no internet route. CodeBuild has both, so the binary is fetched
+        # here and served to the appliance over the S3 gateway endpoint.
+        echo "== mirroring docker compose $DOCKER_COMPOSE_VERSION"
+
+        base="https://github.com/docker/compose/releases/download/$DOCKER_COMPOSE_VERSION"
+        curl -fsSL -o /tmp/docker-compose "$base/docker-compose-linux-x86_64"
+        curl -fsSL -o /tmp/docker-compose.sha256 "$base/docker-compose-linux-x86_64.sha256"
+
+        # Verify upstream's published checksum before trusting the binary.
+        expected=$(awk '{print $1}' /tmp/docker-compose.sha256)
+        actual=$(sha256sum /tmp/docker-compose | awk '{print $1}')
+        if [ "$expected" != "$actual" ]; then
+          echo "FATAL: docker-compose checksum mismatch (expected $expected, got $actual)" >&2
+          exit 1
+        fi
+        echo "   checksum verified: $actual"
+
+        aws s3 cp /tmp/docker-compose "s3://$TOOLING_BUCKET/docker-compose/$DOCKER_COMPOSE_VERSION/docker-compose"
+
+        aws ssm put-parameter --name "/$NAME_PREFIX/tooling/docker-compose-uri" \
+          --type String --overwrite \
+          --value "s3://$TOOLING_BUCKET/docker-compose/$DOCKER_COMPOSE_VERSION/docker-compose"
+        aws ssm put-parameter --name "/$NAME_PREFIX/tooling/docker-compose-sha256" \
+          --type String --overwrite --value "$actual"
+
+        echo "   docker-compose $DOCKER_COMPOSE_VERSION mirrored"

@@ -5,19 +5,21 @@ locals {
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.region}.amazonaws.com"
 
   build_env = {
-    NAME_PREFIX        = var.name_prefix
-    IMAGE_TAG          = var.timesketch_version
-    ECR_REGISTRY       = local.ecr_registry
-    ECR_TIMESKETCH     = var.ecr_repository_urls["timesketch"]
-    ECR_OPENSEARCH     = var.ecr_repository_urls["opensearch"]
-    ECR_POSTGRES       = var.ecr_repository_urls["postgres"]
-    ECR_REDIS          = var.ecr_repository_urls["redis"]
-    ECR_NGINX          = var.ecr_repository_urls["nginx"]
-    TIMESKETCH_VERSION = var.timesketch_version
-    OPENSEARCH_VERSION = var.opensearch_version
-    POSTGRES_VERSION   = var.postgres_version
-    REDIS_VERSION      = var.redis_version
-    NGINX_VERSION      = var.nginx_version
+    NAME_PREFIX            = var.name_prefix
+    IMAGE_TAG              = var.timesketch_version
+    ECR_REGISTRY           = local.ecr_registry
+    ECR_TIMESKETCH         = var.ecr_repository_urls["timesketch"]
+    ECR_OPENSEARCH         = var.ecr_repository_urls["opensearch"]
+    ECR_POSTGRES           = var.ecr_repository_urls["postgres"]
+    ECR_REDIS              = var.ecr_repository_urls["redis"]
+    ECR_NGINX              = var.ecr_repository_urls["nginx"]
+    TIMESKETCH_VERSION     = var.timesketch_version
+    OPENSEARCH_VERSION     = var.opensearch_version
+    POSTGRES_VERSION       = var.postgres_version
+    REDIS_VERSION          = var.redis_version
+    NGINX_VERSION          = var.nginx_version
+    TOOLING_BUCKET         = var.tooling_bucket
+    DOCKER_COMPOSE_VERSION = var.docker_compose_version
   }
 }
 

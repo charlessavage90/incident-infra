@@ -62,6 +62,13 @@ resource "aws_iam_role_policy" "appliance" {
         Resource = aws_kms_key.main.arn
       },
       {
+        # Read mirrored tooling binaries (Docker Compose; Phase 3 plaso tooling).
+        Sid      = "ToolingRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.tooling.arn}/*"
+      },
+      {
         # Read the generated secrets written by the analysis layer.
         Sid      = "SecretsRead"
         Effect   = "Allow"
