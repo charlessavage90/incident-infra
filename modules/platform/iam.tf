@@ -91,3 +91,126 @@ resource "aws_iam_instance_profile" "appliance" {
   role = aws_iam_role.appliance.name
   tags = local.common_tags
 }
+
+# --- Phase 2: evidence store principals ---
+
+# Break glass (spec 5.2).
+#
+# GOVERNANCE mode differs from COMPLIANCE mode only because some principal can
+# bypass it. That principal is this role, and it is created only when someone is
+# named to assume it -- a standing bypass role nobody asked for is a standing
+# privilege.
+#
+# Spec 5.2.2: without this, `tofu destroy` fails against any bucket holding
+# locked objects, which a development deployment needs.
+resource "aws_iam_role" "break_glass" {
+  count = length(var.break_glass_principal_arns) > 0 ? 1 : 0
+
+  name = "${var.name_prefix}-break-glass"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
+      Principal = { AWS = var.break_glass_principal_arns }
+    }]
+  })
+
+  tags = merge(local.common_tags, {
+    Purpose = "operator-error-recovery"
+  })
+}
+
+resource "aws_iam_role_policy" "break_glass" {
+  count = length(var.break_glass_principal_arns) > 0 ? 1 : 0
+
+  name = "${var.name_prefix}-break-glass"
+  role = aws_iam_role.break_glass[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "BypassGovernanceRetention"
+        Effect = "Allow"
+        Action = [
+          "s3:BypassGovernanceRetention",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
+          "s3:PutObjectLegalHold",
+          "s3:PutObjectRetention",
+          "s3:GetObjectLegalHold",
+          "s3:GetObjectRetention",
+        ]
+        Resource = [
+          "${aws_s3_bucket.evidence.arn}/*",
+          "${aws_s3_bucket.plaso.arn}/*",
+        ]
+      },
+      {
+        Sid      = "KmsUse"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Resource = aws_kms_key.main.arn
+      },
+    ]
+  })
+}
+
+# The responder surface (D12).
+#
+# Attached by the deployer to whichever principal responders actually use. It is
+# deliberately narrow: upload to intake, read and open cases. Everything past
+# intake belongs to the recorder, so a compromised responder credential cannot
+# read the evidence store or rewrite the manifest.
+resource "aws_iam_policy" "responder" {
+  name        = "${var.name_prefix}-responder"
+  description = "Upload artifacts to intake and open cases. Attach to responder principals."
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "IntakeUpload"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+        ]
+        Resource = "${aws_s3_bucket.intake.arn}/*"
+      },
+      {
+        Sid      = "IntakeListForMultipart"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucketMultipartUploads"]
+        Resource = aws_s3_bucket.intake.arn
+      },
+      {
+        Sid    = "CaseReadWrite"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+        ]
+        Resource = aws_dynamodb_table.cases.arn
+      },
+      {
+        # Read-only: a responder can see what has been recorded but cannot write
+        # a custody entry by hand.
+        Sid      = "ArtifactRead"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:Query"]
+        Resource = aws_dynamodb_table.artifacts.arn
+      },
+      {
+        Sid      = "KmsUse"
+        Effect   = "Allow"
+        Action   = ["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"]
+        Resource = aws_kms_key.main.arn
+      },
+    ]
+  })
+}
