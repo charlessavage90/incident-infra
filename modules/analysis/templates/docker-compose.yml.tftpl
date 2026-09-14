@@ -1,0 +1,72 @@
+# Managed by OpenTofu.
+#
+# Every image is referenced by DIGEST, not tag (spec 4.5). Timesketch installs
+# plaso-tools unpinned from ppa:gift, so the same release tag can carry different
+# plaso versions between builds - and Timesketch rejects .plaso files produced by
+# a newer plaso than it runs.
+services:
+  opensearch:
+    image: ${opensearch_image}
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms${opensearch_heap_gb}g -Xmx${opensearch_heap_gb}g"
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - /mnt/data/opensearch:/usr/share/opensearch/data
+
+  postgres:
+    image: ${postgres_image}
+    restart: always
+    environment:
+      - POSTGRES_USER=timesketch
+      - POSTGRES_PASSWORD=${postgres_password}
+      - POSTGRES_DB=timesketch
+    volumes:
+      - /mnt/data/postgresql:/var/lib/postgresql/data
+
+  redis:
+    image: ${redis_image}
+    restart: always
+
+  timesketch-web:
+    image: ${timesketch_image}
+    command: timesketch-web
+    restart: always
+    # Bound to loopback only. Reached via SSM port-forward (D6).
+    ports:
+      - "127.0.0.1:5000:5000"
+    environment:
+      - NUM_WSGI_WORKERS=${num_wsgi_workers}
+      - WSGI_WORKER_CLASS=gthread
+      - NUM_WSGI_THREADS=4
+    volumes:
+      - /opt/timesketch/etc:/etc/timesketch
+      - /mnt/data/upload:/usr/share/timesketch/upload
+    depends_on:
+      - opensearch
+      - postgres
+      - redis
+
+  timesketch-worker:
+    image: ${timesketch_image}
+    command: timesketch-worker
+    restart: always
+    environment:
+      - WORKER_LOG_LEVEL=info
+    volumes:
+      - /opt/timesketch/etc:/etc/timesketch
+      - /mnt/data/upload:/usr/share/timesketch/upload
+    depends_on:
+      - opensearch
+      - postgres
+      - redis

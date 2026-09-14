@@ -1,0 +1,35 @@
+# Managed by OpenTofu. Do not edit on the instance; changes are overwritten on
+# the next activation.
+
+SECRET_KEY = '${secret_key}'
+
+SQLALCHEMY_DATABASE_URI = 'postgresql://timesketch:${postgres_password}@postgres/timesketch'
+SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+OPENSEARCH_HOST = 'opensearch'
+OPENSEARCH_PORT = 9200
+OPENSEARCH_USER = None
+OPENSEARCH_PASSWORD = None
+OPENSEARCH_SSL = False
+OPENSEARCH_VERIFY_CERTS = False
+OPENSEARCH_TIMEOUT = 600
+OPENSEARCH_FLUSH_INTERVAL = 5000
+
+UPLOAD_ENABLED = True
+UPLOAD_FOLDER = '/usr/share/timesketch/upload'
+
+CELERY_BROKER_URL = 'redis://redis:6379'
+CELERY_RESULT_BACKEND = 'redis://redis:6379'
+
+# No federation in Phase 1. Access is the SSM tunnel plus local accounts (D6).
+SSO_ENABLED = False
+GOOGLE_IAP_ENABLED = False
+GOOGLE_OIDC_ENABLED = False
+
+# Break-glass. Timesketch honours local database accounts even when OIDC is
+# enabled, so adding a federated ingress mode later cannot lock responders out.
+LOCAL_AUTH_ALLOWED_USERS = [${local_auth_allowed_users}]
+
+# Analyzers are seeded in Phase 4.
+AUTO_SKETCH_ANALYZERS = []
+ANALYZERS_DEFAULT_KWARGS = {}
