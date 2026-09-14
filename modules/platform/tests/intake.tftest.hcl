@@ -122,3 +122,55 @@ run "responder_policy_can_upload_but_not_reach_evidence" {
     error_message = "A responder must not be able to write a custody entry by hand."
   }
 }
+
+# Spec 5.5. In-VPC placement would put the recorder behind the interface
+# endpoints that dormancy destroys, which would couple the chain of custody to
+# the posture toggle -- artifacts arriving between incidents would go unrecorded.
+run "recorder_is_not_attached_to_the_vpc" {
+  command = plan
+
+  assert {
+    condition     = length(aws_lambda_function.intake.vpc_config) == 0
+    error_message = "A VPC-attached recorder stops working while the environment is dormant, and the gap is silent."
+  }
+}
+
+# It reads metadata and drives a server-side copy. It never reads object bytes,
+# which is what makes running it outside the VPC defensible.
+run "recorder_cannot_read_object_content" {
+  command = plan
+
+  assert {
+    condition = !anytrue([
+      for s in jsondecode(aws_iam_role_policy.intake.policy).Statement :
+      contains(s.Action, "s3:GetObject")
+    ])
+    error_message = "A component that cannot read evidence cannot leak it. HeadObject and a server-side CopyObject are enough."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(aws_iam_role_policy.intake.policy).Statement :
+      contains(s.Action, "s3:PutObjectLegalHold")
+    ])
+    error_message = "The recorder applies the hold that makes an artifact immutable (spec 5.2)."
+  }
+}
+
+run "recorder_is_triggered_by_intake_arrivals" {
+  command = plan
+
+  assert {
+    condition     = one([for l in aws_s3_bucket_notification.intake.lambda_function : l.events]) == toset(["s3:ObjectCreated:*"])
+    error_message = "Recording must begin the moment an object lands, whatever the posture."
+  }
+}
+
+run "recorder_has_the_full_timeout" {
+  command = plan
+
+  assert {
+    condition     = aws_lambda_function.intake.timeout == 900
+    error_message = "The server-side copy of a large artifact needs the whole window; the ceiling is documented, not hidden."
+  }
+}
