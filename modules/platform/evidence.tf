@@ -12,6 +12,23 @@
 #
 # Bucket names carry the account ID as well as the prefix, because bucket names
 # are globally unique -- matching aws_s3_bucket.tooling.
+#
+# Snyk findings accepted here, left VISIBLE rather than suppressed, following the
+# precedent set on the tooling bucket in storage.tf:
+#
+#   SNYK-CC-TF-45 (no server access logging) x3 -- evidence and plaso are Object
+#     Lock buckets, and S3 *cannot* deliver server access logs to one. That is the
+#     whole reason spec 5.1 specifies CloudTrail data events, which audit.tf now
+#     builds over all three buckets. The rule looks for aws_s3_bucket_logging, so
+#     it reports regardless of the control actually being present.
+#   SNYK-CC-TF-127 (no MFA delete) x3 -- cannot be set by Terraform at all; it
+#     needs root credentials presenting an MFA token via the CLI. On evidence and
+#     plaso it is also the weaker control: a legal hold cannot be cleared by
+#     presenting a TOTP code, which is the point of Object Lock.
+#   SNYK-CC-TF-124 (versioning disabled on intake) -- deliberate, and the comment
+#     on that bucket explains it. Versioning intake would retain a delete marker
+#     and a noncurrent version of every artifact the recorder files, which is both
+#     billed storage and a second copy of evidence outside the locked bucket.
 
 resource "aws_s3_bucket" "evidence" {
   bucket              = "${var.name_prefix}-evidence-${data.aws_caller_identity.current.account_id}"

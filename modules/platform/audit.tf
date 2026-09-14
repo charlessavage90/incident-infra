@@ -5,6 +5,20 @@
 # CloudTrail data events. The selector also covers the tooling bucket, which
 # gives SNYK-CC-TF-45 a real compensating control -- though that rule looks for
 # aws_s3_bucket_logging specifically and will keep reporting.
+#
+# The audit bucket is deliberately NOT in its own selector. A trail whose data
+# events include its own destination writes events about writing events.
+#
+# Snyk findings accepted here, left visible:
+#
+#   SNYK-CC-TF-135 (not multi-region) -- spec 11 assumes a single region set by
+#     variable. A multi-region trail bills for regions holding no resources, and
+#     region strategy is an open question rather than a decided one.
+#   SNYK-CC-TF-256 (no CloudWatch integration) -- alarms on evidence access are
+#     genuinely worth having, but alerting is phase 4 work (spec 6) and wiring a
+#     log group and role here would build half of it in the wrong phase.
+#   SNYK-CC-TF-45 / SNYK-CC-TF-127 on this bucket -- as in evidence.tf. Log file
+#     validation is the integrity control that matters for a trail, and it is on.
 
 resource "aws_s3_bucket" "audit" {
   bucket = "${var.name_prefix}-audit-${data.aws_caller_identity.current.account_id}"
