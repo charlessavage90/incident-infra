@@ -38,28 +38,8 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**~~1. Merge PR #3.~~** Done — merged as `00a14f6`.
-
-**~~2. Reconcile the spec with what acceptance proved.~~** Done. The design document now carries an
-**§12 Amendments** table and the corrections are made in place rather than in a parallel errata
-file. A2 (compose binary is mirrored), A5 (cost model measured: ~$15/month dormant, endpoints not
-the appliance dominate active cost) and A6 (six-minute reactivation floor) close this item. Phase 2
-design added A1, A3 and A4 at the same time — read §12 before trusting a remembered reading of that
-document.
-
-**~~1. `docker-compose` pinned to `v5.5.1` on no evidence.~~** Done. **Our compose file's floor is
-Compose v2.0** — no `version:` key, list-form `depends_on`, `ulimits`, short-syntax ports and
-volumes, nothing newer. The pin clears it by three major versions, so it is over-specified rather
-than risky, and bumping it on its own is low-risk.
-
-The non-obvious part is now in `CLAUDE.md`: **the pin and our divergence from upstream protect
-each other.** Compose v5.0.0 made a service depending on a profile-disabled service a hard error.
-Upstream Timesketch's compose file uses profiles heavily; ours has none, which is the only reason
-a v5 compose runs it. Re-syncing toward upstream is safe, bumping compose is safe, doing both is
-not — and neither looks dangerous alone.
-
-**2. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while closing item 1,
-not yet fixed, because it is in `analysis/` and Phase 2 was scoped to touch nothing there.
+**1. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
+compose pin; not fixed, because it is in `analysis/` and Phase 2 was scoped to touch nothing there.
 
 At the pinned `20260630` tag, upstream gives `opensearch`, `postgres` and `redis` healthchecks and
 has `timesketch-web` and `timesketch-worker` wait on `depends_on: condition: service_healthy`.
@@ -75,13 +55,6 @@ measured cause and this has not been separated from it.
 on `service_healthy`, and one activation shows no restart-loop entries for either container in
 `docker compose logs`. Needs a real activation to verify, which costs money and wakes the
 environment — hence the owner's call on when, not whether.
-
-**3. PostgreSQL runs `13-alpine`, not the `13.0-alpine` in Timesketch's `config.env`.** Deliberate:
-the exact 2020 patch release is not on a non-rate-limited registry, and the §4.5 parity invariant
-concerns the *Timesketch* image, not this one. Note that the **already-mirrored image in ECR is
-still the original `13.0-alpine`**, because the mirror is idempotent and skipped it. A fresh
-deployment will get `13-alpine`; this one has not been re-pulled. Harmless, but do not be confused
-by the mismatch.
 
 ---
 

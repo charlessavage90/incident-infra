@@ -135,6 +135,15 @@ why acceptance passed.
 images already present. Sources are ECR Public, not Docker Hub, which rate-limits anonymous pulls
 per IP and broke the mirror in practice.
 
+The cost of that idempotency is that **changing a pinned version does not change what is already
+mirrored.** A deployed ECR can hold an image the current configuration would no longer choose,
+and a fresh deployment will disagree with it. This has already happened once: `postgres` moved
+from `13.0-alpine` to `13-alpine` (the exact 2020 patch release is on no non-rate-limited
+registry), and the development account's ECR still holds `13.0-alpine` because the mirror saw the
+repository populated and skipped it. Harmless there — §4.5's parity invariant is about the
+*Timesketch* image, not this one — but the same mechanism applied to the Timesketch image would
+not be harmless. Re-mirroring means deleting the ECR tag first, deliberately.
+
 ### `modules/analysis/templates/cloud-init.sh.tftpl`
 
 Four guards, each of which caused a real failure. It runs on every boot of a *replaced* instance,
