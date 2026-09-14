@@ -29,6 +29,7 @@ module "images" {
   name_prefix         = data.terraform_remote_state.platform.outputs.platform.name_prefix
   ecr_repository_urls = data.terraform_remote_state.platform.outputs.platform.ecr_repository_urls
   kms_key_arn         = data.terraform_remote_state.platform.outputs.platform.kms_key_arn
+  tooling_bucket      = data.terraform_remote_state.platform.outputs.platform.tooling_bucket
 }
 
 output "mirror_project_name" {

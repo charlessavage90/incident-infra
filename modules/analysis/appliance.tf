@@ -100,6 +100,13 @@ resource "aws_instance" "appliance" {
   # and no evidence is lost.
   user_data_replace_on_change = true
 
+  # Nothing in the resource graph otherwise forces the endpoints to exist before
+  # the instance boots. Without this the instance can come up into a VPC with no
+  # route to SSM, ECR, or Secrets Manager; cloud-init then fails and never runs
+  # again, leaving a running instance with no Timesketch on it. Observed during
+  # Phase 1 acceptance.
+  depends_on = [aws_vpc_endpoint.interface]
+
   tags = merge(local.common_tags, { Name = "${var.name_prefix}-appliance" })
 
   lifecycle {
@@ -127,6 +134,18 @@ resource "aws_volume_attachment" "data" {
 resource "aws_ec2_instance_state" "appliance" {
   instance_id = aws_instance.appliance.id
   state       = var.posture == "active" ? "running" : "stopped"
+
+  # This dependency matters more than the one on aws_instance, and is easy to
+  # miss. On reactivation the instance already exists, so the only thing that
+  # changes is this resource -- meaning without an explicit dependency Terraform
+  # may start the instance before the interface endpoints are back.
+  #
+  # The consequence is not a slow start, it is an hour-long one: the SSM agent
+  # finds no route to ssm.<region>.amazonaws.com and logs "entering hibernation
+  # due to error", after which it backs off for up to an hour. For a system whose
+  # entire promise is "dormant to queryable in minutes", that is the difference
+  # between working and not. Observed during Phase 1 acceptance.
+  depends_on = [aws_vpc_endpoint.interface]
 }
 
 # A stable name, because connector application segments should reference a name

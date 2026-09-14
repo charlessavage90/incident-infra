@@ -25,9 +25,15 @@ resource "aws_iam_role_policy" "mirror" {
         Resource = "arn:aws:logs:*:*:log-group:/aws/codebuild/${var.name_prefix}-image-mirror*"
       },
       {
-        Sid      = "EcrAuth"
-        Effect   = "Allow"
-        Action   = "ecr:GetAuthorizationToken"
+        # Private ECR for pushing; ECR Public for pulling upstream images.
+        # ECR Public auth additionally requires sts:GetServiceBearerToken.
+        Sid    = "EcrAuth"
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr-public:GetAuthorizationToken",
+          "sts:GetServiceBearerToken",
+        ]
         Resource = "*"
       },
       {
@@ -45,10 +51,19 @@ resource "aws_iam_role_policy" "mirror" {
       },
       {
         # Scoped to this deployment's parameters only.
-        Sid      = "PublishImageDigests"
+        Sid    = "PublishImageDigests"
+        Effect = "Allow"
+        Action = "ssm:PutParameter"
+        Resource = [
+          "arn:aws:ssm:*:*:parameter/${var.name_prefix}/images/*",
+          "arn:aws:ssm:*:*:parameter/${var.name_prefix}/tooling/*",
+        ]
+      },
+      {
+        Sid      = "MirrorTooling"
         Effect   = "Allow"
-        Action   = "ssm:PutParameter"
-        Resource = "arn:aws:ssm:*:*:parameter/${var.name_prefix}/images/*"
+        Action   = ["s3:PutObject"]
+        Resource = "arn:aws:s3:::${var.tooling_bucket}/*"
       },
       {
         Sid      = "KmsUse"

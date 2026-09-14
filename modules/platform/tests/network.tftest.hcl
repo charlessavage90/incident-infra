@@ -119,3 +119,27 @@ run "s3_gateway_endpoint_exists" {
     error_message = "S3 must use a gateway endpoint. ECR image layers are fetched from S3."
   }
 }
+
+# Both statements are load-bearing. The account condition stops a compromised
+# instance copying evidence to another account's bucket; the service statement
+# keeps the OS working, because Amazon Linux repos are fetched anonymously and
+# ECR layers come via presigned URLs signed with AWS's own credentials. Either
+# alone is broken. Both failures were observed during Phase 1 acceptance.
+run "s3_endpoint_policy_allows_aws_owned_buckets" {
+  command = plan
+
+  assert {
+    condition     = strcontains(aws_vpc_endpoint.s3.policy, "aws:PrincipalAccount")
+    error_message = "S3 endpoint must restrict this account's own principals."
+  }
+
+  assert {
+    condition     = strcontains(aws_vpc_endpoint.s3.policy, "al2023-repos-")
+    error_message = "S3 endpoint must allow Amazon Linux repos, which are fetched anonymously - otherwise dnf gets 403."
+  }
+
+  assert {
+    condition     = strcontains(aws_vpc_endpoint.s3.policy, "starport-layer-bucket")
+    error_message = "S3 endpoint must allow ECR layer buckets, which are presigned by AWS - otherwise docker pull gets 403."
+  }
+}

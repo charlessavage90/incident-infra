@@ -37,8 +37,14 @@ variable "opensearch_version" {
 
 variable "postgres_version" {
   type        = string
-  description = "PostgreSQL version, per Timesketch config.env."
-  default     = "13.0-alpine"
+  description = <<-EOT
+    PostgreSQL version. Timesketch's config.env pins 13.0-alpine, but that exact
+    2020 patch release is not carried by ECR Public, and Docker Hub rate-limits
+    anonymous pulls. 13-alpine is the same major version with six years of
+    security fixes. Major version is what Timesketch compatibility depends on;
+    the parity invariant in spec 4.5 concerns the Timesketch image, not this one.
+  EOT
+  default     = "13-alpine"
 }
 
 variable "redis_version" {
@@ -51,4 +57,15 @@ variable "nginx_version" {
   type        = string
   description = "nginx version, per Timesketch config.env."
   default     = "1.25.5-alpine-slim"
+}
+
+variable "tooling_bucket" {
+  type        = string
+  description = "Bucket for mirrored tooling binaries, from the platform layer."
+}
+
+variable "docker_compose_version" {
+  type        = string
+  description = "Docker Compose v2 release to mirror. AL2023 packages no compose plugin."
+  default     = "v5.5.1"
 }

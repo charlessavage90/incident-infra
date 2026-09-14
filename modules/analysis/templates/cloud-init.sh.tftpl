@@ -13,11 +13,106 @@ REGION="${region}"
 echo 'vm.max_map_count=262144' > /etc/sysctl.d/99-opensearch.conf
 sysctl -p /etc/sysctl.d/99-opensearch.conf
 
-dnf install -y docker nvme-cli
+# Retry package installation.
+#
+# cloud-init runs once and never again, so a transient failure here leaves a
+# running instance with no Timesketch on it and no way to recover but replacing
+# the instance. The VPC endpoints and the S3 gateway route may also be settling
+# while this runs.
+retry() {
+  local attempts="$1"; shift
+  local n=1
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then
+      echo "FATAL: '$*' failed after $n attempts" >&2
+      return 1
+    fi
+    echo "attempt $n of $attempts failed: $* - retrying in 15s" >&2
+    n=$((n + 1))
+    sleep 15
+  done
+}
+
+# Amazon Linux 2023 packages docker and nvme-cli, but NOT docker compose.
+retry 10 dnf install -y docker nvme-cli
 systemctl enable --now docker
 
-# Compose v2 as a CLI plugin.
-dnf install -y docker-compose-plugin
+# Docker Compose v2 comes from the mirror, not from dnf and not from GitHub.
+# AL2023 has no compose package and this VPC has no internet route, so the
+# images module fetches the binary in CodeBuild and stores it in S3, reachable
+# here over the S3 gateway endpoint.
+COMPOSE_PLUGIN_DIR=/usr/local/lib/docker/cli-plugins
+mkdir -p "$COMPOSE_PLUGIN_DIR"
+if ! docker compose version >/dev/null 2>&1; then
+  COMPOSE_URI=$(aws ssm get-parameter --region "$REGION" --name "/${name_prefix}/tooling/docker-compose-uri" --query 'Parameter.Value' --output text)
+  COMPOSE_SHA=$(aws ssm get-parameter --region "$REGION" --name "/${name_prefix}/tooling/docker-compose-sha256" --query 'Parameter.Value' --output text)
+
+  retry 5 aws s3 cp --region "$REGION" "$COMPOSE_URI" "$COMPOSE_PLUGIN_DIR/docker-compose"
+
+  # Verify the checksum the mirror recorded from upstream's published value.
+  actual=$(sha256sum "$COMPOSE_PLUGIN_DIR/docker-compose" | awk '{print $1}')
+  if [ "$actual" != "$COMPOSE_SHA" ]; then
+    echo "FATAL: docker-compose checksum mismatch (expected $COMPOSE_SHA, got $actual)" >&2
+    exit 1
+  fi
+  chmod 0755 "$COMPOSE_PLUGIN_DIR/docker-compose"
+fi
+docker compose version
+
+# --- GOTCHA 4: the SSM agent races endpoint readiness on every reactivation ---
+#
+# Dormancy destroys the interface endpoints and activation recreates them. On the
+# next boot the SSM agent starts within ~90s, tries to reach
+# ssm.<region>.amazonaws.com before the new ENI is passing traffic, logs
+# "entering hibernation due to error", and then backs off for up to an HOUR.
+#
+# For a system whose promise is "dormant to queryable in minutes", that is the
+# difference between working and not. Observed twice during Phase 1 acceptance,
+# and NOT fixed by Terraform dependency ordering: the endpoint reports
+# "available" via the API well before its ENI actually forwards packets.
+#
+# cloud-init's scripts-user does not re-run on stop/start, only on replacement,
+# so this guard has to be a systemd unit to fire on every boot.
+cat > /usr/local/bin/ssm-endpoint-wait.sh <<'SSMWAIT'
+#!/bin/bash
+# Wait for the SSM endpoint to actually accept connections, then bounce the
+# agent so it leaves hibernation immediately rather than in an hour.
+set -uo pipefail
+REGION_ARG="$1"
+HOST="ssm.$REGION_ARG.amazonaws.com"
+
+for _ in $(seq 1 60); do
+  if timeout 5 bash -c "</dev/tcp/$HOST/443" 2>/dev/null; then
+    systemctl restart amazon-ssm-agent || true
+    logger -t ssm-endpoint-wait "SSM endpoint reachable; agent restarted"
+    exit 0
+  fi
+  sleep 10
+done
+
+logger -t ssm-endpoint-wait "SSM endpoint never became reachable"
+exit 0
+SSMWAIT
+chmod 0755 /usr/local/bin/ssm-endpoint-wait.sh
+
+cat > /etc/systemd/system/ssm-endpoint-wait.service <<SSMUNIT
+[Unit]
+Description=Restart the SSM agent once its VPC endpoint is reachable
+After=network-online.target amazon-ssm-agent.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ssm-endpoint-wait.sh $REGION
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+SSMUNIT
+
+systemctl daemon-reload
+systemctl enable ssm-endpoint-wait.service
+systemctl start ssm-endpoint-wait.service --no-block
 
 # --- GOTCHA 2: NVMe device naming on Nitro instances ---
 #
@@ -66,10 +161,10 @@ mkdir -p /mnt/data
 grep -q "LABEL=irdata" /etc/fstab || echo "LABEL=irdata /mnt/data ext4 defaults,nofail 0 2" >> /etc/fstab
 mount -a
 
-mkdir -p /mnt/data/opensearch /mnt/data/postgresql /mnt/data/upload
+mkdir -p /mnt/data/opensearch /mnt/data/postgresql /mnt/data/upload /mnt/data/logs
 
 # OpenSearch runs as uid 1000 inside its container.
-chown -R 1000:1000 /mnt/data/opensearch /mnt/data/upload
+chown -R 1000:1000 /mnt/data/opensearch /mnt/data/upload /mnt/data/logs
 chmod 700 /mnt/data/postgresql
 
 # --- Application config and digest-pinned images (spec 4.5) ---
@@ -104,10 +199,16 @@ done
 %{ for user in responders ~}
 if ! docker compose exec -T timesketch-web tsctl list-users 2>/dev/null | grep -qx "${user}"; then
   echo "creating Timesketch user ${user}"
+  # set -x is on for this script, which would otherwise echo the generated
+  # password into /var/log/cloud-init-output.log in plaintext, readable by
+  # anyone who can reach this instance. Disable tracing around the secret.
+  set +x
   PW=$(aws secretsmanager get-secret-value --region "$REGION" \
     --secret-id "${name_prefix}/responders/${user}" \
     --query SecretString --output text)
-  docker compose exec -T timesketch-web tsctl create-user "${user}" --password "$PW"
+  docker compose exec -T timesketch-web tsctl create-user "${user}" --password "$PW" >/dev/null 2>&1
+  unset PW
+  set -x
 else
   echo "Timesketch user ${user} already exists"
 fi

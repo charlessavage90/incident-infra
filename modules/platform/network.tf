@@ -118,26 +118,58 @@ resource "aws_vpc_endpoint" "s3" {
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private.id]
 
-  # Without an explicit policy an endpoint is usable by any principal that can
-  # reach it, including principals outside this account. Scope it to this
-  # account: from Phase 2 this endpoint carries evidence, and the IR account is
-  # deliberately isolated from the environment under investigation (D2).
+  # Two statements, and both are load-bearing.
   #
-  # Not narrowed to specific buckets, because this endpoint also serves ECR
-  # image-layer pulls from AWS-owned buckets whose names are region-specific.
+  # The account condition is the point of having a policy at all: without it a
+  # compromised instance inside this VPC could use the endpoint to copy evidence
+  # into an attacker-controlled bucket in another account. From Phase 2 this
+  # endpoint carries evidence, so that matters.
+  #
+  # But the account condition cannot be the ONLY statement, because the two
+  # things this instance must fetch over S3 do not carry this account's
+  # principal at all:
+  #
+  #   - Amazon Linux package repositories are fetched as ANONYMOUS requests.
+  #     There is no principal, so the condition never matches and dnf gets 403.
+  #   - ECR serves image layers via PRESIGNED URLs signed with AWS's own
+  #     credentials, not the caller's, so docker pull gets 403 too.
+  #
+  # Both were observed during Phase 1 acceptance. The service statement below is
+  # scoped to AWS-owned buckets and read-only, so it does not reopen the
+  # exfiltration path the first statement closes.
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = "*"
-      Action    = "*"
-      Resource  = "*"
-      Condition = {
-        StringEquals = {
-          "aws:PrincipalAccount" = data.aws_caller_identity.current.account_id
+    Statement = [
+      {
+        Sid       = "ThisAccountOnly"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "*"
+        Resource  = "*"
+        Condition = {
+          StringEquals = {
+            "aws:PrincipalAccount" = data.aws_caller_identity.current.account_id
+          }
         }
-      }
-    }]
+      },
+      {
+        Sid       = "AwsOwnedServiceBuckets"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = ["s3:GetObject"]
+        Resource = [
+          # Amazon Linux 2023 package repositories (anonymous)
+          "arn:aws:s3:::al2023-repos-${data.aws_region.current.region}-*/*",
+          "arn:aws:s3:::amazonlinux-2-repos-${data.aws_region.current.region}/*",
+          "arn:aws:s3:::packages.${data.aws_region.current.region}.amazonaws.com/*",
+          "arn:aws:s3:::repo.${data.aws_region.current.region}.amazonaws.com/*",
+          # ECR image layers (presigned with AWS credentials)
+          "arn:aws:s3:::prod-${data.aws_region.current.region}-starport-layer-bucket/*",
+          # SSM agent updates
+          "arn:aws:s3:::amazon-ssm-${data.aws_region.current.region}/*",
+        ]
+      },
+    ]
   })
 
   tags = merge(local.common_tags, { Name = "${var.name_prefix}-s3" })

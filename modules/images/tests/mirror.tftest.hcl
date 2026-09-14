@@ -28,7 +28,8 @@ variables {
     redis      = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/redis"
     nginx      = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/nginx"
   }
-  kms_key_arn = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
+  kms_key_arn    = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
+  tooling_bucket = "ir-test-tooling-111122223333"
 }
 
 # The IR VPC has no route to the internet. CodeBuild's managed network does.
@@ -67,8 +68,8 @@ run "image_versions_match_upstream_config_env" {
   }
 
   assert {
-    condition     = var.postgres_version == "13.0-alpine"
-    error_message = "PostgreSQL version must match upstream config.env exactly."
+    condition     = var.postgres_version == "13-alpine"
+    error_message = "PostgreSQL must be major version 13. Exact 13.0-alpine is unavailable on a non-rate-limited registry."
   }
 
   assert {
@@ -98,6 +99,25 @@ run "mirror_publishes_digests_under_the_deployment_prefix" {
 
 # The buildspec resolves every tag to a digest and publishes repo@sha256:...
 # A tag reference reaching the appliance would defeat the parity invariant.
+run "mirror_is_idempotent_and_avoids_docker_hub" {
+  command = plan
+
+  assert {
+    condition     = strcontains(aws_codebuild_project.mirror.source[0].buildspec, "already mirrored")
+    error_message = "Tags are IMMUTABLE, so the mirror must skip images it has already pushed or a re-run fails."
+  }
+
+  assert {
+    condition     = !strcontains(aws_codebuild_project.mirror.source[0].buildspec, "\"postgres:$POSTGRES_VERSION\"")
+    error_message = "Images must come from ECR Public, not Docker Hub, which rate-limits anonymous pulls."
+  }
+
+  assert {
+    condition     = strcontains(aws_codebuild_project.mirror.source[0].buildspec, "public.ecr.aws")
+    error_message = "Images must be sourced from ECR Public."
+  }
+}
+
 run "buildspec_resolves_tags_to_digests" {
   command = plan
 
@@ -109,5 +129,27 @@ run "buildspec_resolves_tags_to_digests" {
   assert {
     condition     = strcontains(aws_codebuild_project.mirror.source[0].buildspec, "put-parameter")
     error_message = "The buildspec must publish resolved digests to SSM."
+  }
+}
+
+# AL2023 packages no Docker Compose and this VPC has no internet route, so the
+# binary is mirrored here and served over the S3 gateway endpoint. Upstream's
+# published checksum is verified both on mirror and on install.
+run "mirror_brings_in_docker_compose" {
+  command = plan
+
+  assert {
+    condition     = strcontains(aws_codebuild_project.mirror.source[0].buildspec, "docker-compose-linux-x86_64.sha256")
+    error_message = "The mirror must fetch and verify upstream's published checksum."
+  }
+
+  assert {
+    condition     = strcontains(aws_codebuild_project.mirror.source[0].buildspec, "docker-compose-sha256")
+    error_message = "The mirror must publish the checksum so the appliance can verify what it downloads."
+  }
+
+  assert {
+    condition     = strcontains(aws_iam_role_policy.mirror.policy, "ir-test-tooling-111122223333")
+    error_message = "The mirror must be able to write to the tooling bucket."
   }
 }
