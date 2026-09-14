@@ -57,3 +57,15 @@ variable "allowed_ingress_security_group_ids" {
   description = "Security groups permitted to reach the appliance on 443."
   default     = []
 }
+
+variable "data_volume_gb" {
+  type        = number
+  description = "Size of the persistent OpenSearch and PostgreSQL data volume."
+  default     = 500
+}
+
+variable "private_zone_name" {
+  type        = string
+  description = "Private hosted zone name. Connector app segments reference names, not IPs."
+  default     = "ir.internal"
+}
