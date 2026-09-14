@@ -69,3 +69,77 @@ variable "private_zone_name" {
   description = "Private hosted zone name. Connector app segments reference names, not IPs."
   default     = "ir.internal"
 }
+
+# --- Phase 2: evidence store (spec 5) ---
+
+variable "retention_years" {
+  type        = number
+  description = <<-EOT
+    Years an artifact is retained after its case closes (D10). The clock starts at case
+    close, not at upload -- see spec 5.2. Phase 2 records this on the case; phase 4's case
+    close is what applies it.
+  EOT
+  default     = 3
+
+  validation {
+    condition     = var.retention_years >= 1 && var.retention_years <= 100
+    error_message = "retention_years must be between 1 and 100."
+  }
+}
+
+variable "object_lock_mode" {
+  type        = string
+  description = "GOVERNANCE (reversible by a break-glass role) or COMPLIANCE (irreversible)."
+  default     = "GOVERNANCE"
+
+  validation {
+    condition     = contains(["GOVERNANCE", "COMPLIANCE"], var.object_lock_mode)
+    error_message = "object_lock_mode must be \"GOVERNANCE\" or \"COMPLIANCE\"."
+  }
+}
+
+variable "acknowledge_compliance_mode_is_irreversible" {
+  type        = bool
+  description = <<-EOT
+    Required to be true when object_lock_mode is COMPLIANCE. Compliance-locked objects cannot
+    be deleted before expiry by anyone, including the account root -- AWS documents the sole
+    escape as deleting the AWS account -- and the bucket cannot be destroyed while they exist,
+    so `tofu destroy` fails against one. Never set this in a development or sandbox account.
+  EOT
+  default     = false
+}
+
+variable "intake_expiry_days" {
+  type        = number
+  description = <<-EOT
+    Days before an object left in the intake bucket expires. Intake is a quarantine boundary,
+    not storage: the recorder deletes objects it has filed, so anything still here after this
+    window failed to record and should be investigated rather than kept.
+  EOT
+  default     = 7
+
+  validation {
+    condition     = var.intake_expiry_days >= 1
+    error_message = "intake_expiry_days must be at least 1."
+  }
+}
+
+variable "manifest_deletion_protection" {
+  type        = bool
+  description = <<-EOT
+    Blocks deletion of the case and artifact tables. The manifest is the only thing in this
+    design that cannot be reconstructed -- evidence can be re-hashed, a chain of custody
+    cannot be re-derived. Set false only to tear down a development deployment (spec 5.2.2).
+  EOT
+  default     = true
+}
+
+variable "break_glass_principal_arns" {
+  type        = list(string)
+  description = <<-EOT
+    Principals permitted to assume the break-glass role, which holds
+    s3:BypassGovernanceRetention for genuine operator error -- ingesting the wrong client's
+    data, for example (spec 5.2). Empty means no role is created.
+  EOT
+  default     = []
+}
