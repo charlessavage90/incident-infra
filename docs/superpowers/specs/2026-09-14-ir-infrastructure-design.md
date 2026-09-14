@@ -42,17 +42,17 @@ tell a deliberate choice from an accident.
 |---|---|---|
 | D1 | Built for internal use, with module boundaries clean enough to open-source later | Open-sourcing from day one; org-specific hardcoding |
 | D2 | Deployed in a dedicated IR AWS account, isolated from the environment under investigation | Security/logging account; per-incident vended account |
-| D3 | Warm dormancy — compute stopped, data hot, spin-up in minutes | Cold (destroy + re-ingest); frozen (snapshot everything) |
+| D3 | Warm dormancy — compute stopped, data hot, spin-up in minutes (measured floor ~6 min, §3.2) | Cold (destroy + re-ingest); frozen (snapshot everything) |
 | D4 | Two ingest routes: plaso, or direct Timesketch CSV/JSONL import | Single plaso lane; four-lane classifier |
 | D5 | No pre-built normalizers in v1; Timesketch's header-mapping UI is the escape hatch | Shipping Okta/Entra/Workspace mappings; a plugin framework |
 | D6 | No public ingress. SSM port-forward is the always-on access floor | Public ALB + Cognito; ALB federated to corporate SSO |
 | D7 | The module does not own connectivity. It exposes an attachment surface for org-managed access (ZPA, Tailscale, TGW, Client VPN) | Building Client VPN or Site-to-Site VPN into the module |
 | D8 | Default sizing targets 100 GB–1 TB per incident, 3–6 responders | Single-box-fits-all; large-scale-from-day-one |
-| D9 | Evidence uses Object Lock in governance mode under an event hold; compliance mode available per case | Compliance mode everywhere; no Object Lock |
+| D9 | Evidence uses Object Lock in governance mode, held by an S3 **legal hold** until case close (A3); compliance mode available per case | Compliance mode everywhere; no Object Lock |
 | D10 | Retention is 3 years, starting when a case closes | 7 years; 1 year; no default |
 | D11 | A case is a data concept (sketch + prefix + record), not an infrastructure concept | An OpenTofu stack per case; hybrid per-case analysis stacks |
 | D12 | Intake is a responder CLI push to S3 | Presigned URLs for third parties; cross-account pull; web upload |
-| D13 | EC2 appliance running upstream `docker-compose`, plus an elastic plaso fleet | Everything on one box; fully managed services |
+| D13 | EC2 appliance running upstream `docker-compose`, plus an elastic plaso fleet. The compose *file* is upstream's, unmodified; the compose *binary* is mirrored (A2) | Everything on one box; fully managed services |
 | D14 | plaso runs on AWS Batch, EC2 on-demand | Batch on Spot; Fargate tasks with attached EBS |
 | D15 | Step Functions orchestrates; dfTimewolf is reserved for the EBS snapshot phase | dfTimewolf as the outer orchestrator |
 | D16 | OpenTofu (MPL-2.0) is the IaC tool; HCL is Terraform-compatible | Terraform (BUSL), given D1's intent to open-source |
@@ -115,15 +115,33 @@ variable "posture" {
 | EC2 appliance | running | **stopped** via `aws_ec2_instance_state` — not destroyed |
 | Batch compute environment | `ENABLED` | `DISABLED` |
 | VPC interface endpoints | created | **destroyed** |
-| Intake EventBridge rule | enabled | disabled |
+| Ingest pipeline trigger (§4.1) | enabled | disabled |
+| Intake recording (§5.5) | enabled | **enabled** |
 | EBS data volumes, S3, VPC, DNS, DynamoDB | unchanged | unchanged |
 
 `posture` is a variable of the `analysis/` layer. `platform/` has no equivalent and is applied
 independently.
 
+**Two triggers, not one (A4).** The *pipeline* trigger — the one that starts Step Functions,
+Batch, and a Timesketch import — is posture-gated, because every one of those depends on a
+running appliance. The *intake record* — verify, manifest, copy to evidence, apply the hold — is
+not, because it depends on nothing dormancy touches, and its failure mode is a silent gap in
+the chain of custody. An artifact that arrives while the environment is asleep is still
+recorded and still made immutable; it simply is not timelined until the environment wakes.
+§5.5 gives the argument in full.
+
 Destroying the VPC interface endpoints when dormant does not strand the environment. Starting
 the appliance is an EC2 control-plane call, not an SSM call; activation recreates the endpoints
 before any responder connects. Only the interactive path depends on them.
+
+**Reactivation has a measured floor of roughly six minutes**, and the endpoints set it, not the
+instance. A recreated interface endpoint reports `available` through the API before its ENI
+actually forwards packets; the SSM agent starts inside that window, fails, and would back off
+for up to an hour. `ssm-endpoint-wait.service` on the appliance restarts it once the endpoint
+answers. Six minutes is inside D3's promise of "minutes", but it is a floor rather than a
+target, and it should be stated rather than discovered. Keeping the three SSM endpoints alive
+through dormancy would remove the race entirely at roughly $22/month of dormant cost; that
+trade has not been taken.
 
 **Invariant — the network layer is stable across dormancy.** Dormant mode never destroys the
 VPC, subnets, route tables, security groups, or private DNS. Third-party connectors attach once
@@ -223,15 +241,17 @@ public-ALB mode later is additive rather than a refactor of the networking and w
 irctl upload --case CASE-2026-014 triage.zip
         │  (hashes client-side, at the point of collection)
         ▼
-   S3 intake ──EventBridge──▶ Step Functions
+   S3 intake      the PUT carries x-amz-checksum-sha256; S3 verifies it
+        │         server-side and rejects a mismatched upload (§4.2)
+        │
+        ├─s3:ObjectCreated─▶ RecordIntake     manifest entry, written
+        │                                         conditionally so a re-upload
+        │                                         is a no-op; copy to evidence
+        │                                         bucket; legal hold ON (§5.2)
+        │
+        └───EventBridge───▶ Step Functions
                                    │
                                    ▼
-                              VerifyHash          recompute SHA-256,
-                                   │              compare to source hash
-                                   ▼
-                             RecordIntake         DynamoDB manifest entry,
-                                   │              copy to evidence bucket,
-                                   ▼              Object Lock event hold ON
                                  Route            .csv / .jsonl / .json ?
                                    │
                         ┌──────────┴──────────┐
@@ -248,15 +268,32 @@ irctl upload --case CASE-2026-014 triage.zip
                                          SNS notify
 ```
 
-The three steps before `Route` are sequential, not parallel: an artifact whose hash fails
-verification is never recorded or copied to evidence.
+An artifact whose hash fails verification never reaches the bucket at all, so it is never
+recorded and never copied to evidence. `RecordIntake` runs regardless of posture; the Step
+Functions branch does not (§3.2).
 
 ### 4.2 Hashing at source
 
-The CLI computes SHA-256 **before upload**, and the pipeline verifies it on arrival. Hashing
+The CLI computes SHA-256 **before upload**, and the hash is verified on arrival. Hashing
 after arrival proves only that S3 did not corrupt the object; hashing at the point of collection
 is what is actually defensible. It also provides free deduplication — a triage package uploaded
 twice is recognized and not reprocessed.
+
+**Verification happens at PUT, not in a pipeline step (A1).** S3 accepts the client's digest as
+`x-amz-checksum-sha256` on `PutObject` and `UploadPart`, verifies it server-side, and rejects
+the request on mismatch. That is strictly stronger than re-reading the object afterwards, and
+it is why no component in this design ever needs to re-hash evidence — which matters, because a
+Lambda cannot stream a 20 GB triage package inside its 15-minute limit. A design that required
+it would have been load-bearing on a step that silently does not scale.
+
+Two consequences, because they are easy to get wrong:
+
+- A multipart upload stores a **composite** digest of the form `<hash>-N` — a hash of the
+  concatenated part hashes, not of the object. S3 still verifies every part it received, so
+  byte integrity is end-to-end either way, but the whole-file SHA-256 must *also* be written to
+  object metadata and to the manifest. That is the value custody and deduplication key on.
+- Below the multipart threshold the stored checksum *is* the whole-file SHA-256, and S3 will
+  return it on request. Only the large-artifact path needs the metadata fallback.
 
 ### 4.3 Routing
 
@@ -341,30 +378,58 @@ given.
 
 | Bucket | Purpose | Protection |
 |---|---|---|
-| `intake` | Landing zone | Short lifecycle; objects move out after processing |
+| `intake` | Landing zone | CMK-encrypted, unversioned, short expiry lifecycle, TLS-only |
 | `evidence` | Raw artifacts as received | Object Lock, versioned, CMK-encrypted |
 | `plaso` | Generated `.plaso` timelines | Object Lock — derived evidence is still evidence |
 | `audit` | CloudTrail data events | Versioned, CMK-encrypted |
 
+**The Object Lock buckets carry no bucket-level default retention**, and that omission is
+deliberate rather than an oversight. A default retention stamps a retain-until date at PUT,
+which is exactly the behaviour §5.2 exists to avoid: the clock must start at case close, not at
+upload. Retention is applied per object, once, by the case-close operation.
+
+The intake bucket is kept as a quarantine boundary even though S3 now verifies the hash at PUT
+(§4.2), because the remaining risk it addresses is a *correctly transferred* artifact filed
+against the wrong case. Under governance mode that is recoverable by the break-glass role;
+under the per-case compliance mode of §5.2 it is not recoverable by anyone. Somewhere for an
+artifact to be wrong before it becomes permanent is worth one server-side copy.
+
 Object Lock buckets cannot receive S3 server access logs, so bucket-level access auditing uses
-CloudTrail data events.
+CloudTrail data events. Those data events cover the tooling bucket of §3.3 as well, which gives
+the read-auditing control that its outstanding Snyk `SNYK-CC-TF-45` finding asks for — by a
+different mechanism than the one that rule looks for.
 
 ### 5.2 Retention model
 
-Artifacts are written under **governance mode with an event hold**. The retain-until date is not
-fixed at upload; it is computed when the hold is **released**.
+The retain-until date is not fixed at upload; it is computed when the case closes. This matches
+how evidence retention actually works. At ingest you cannot know how long an artifact must be
+kept, but you do know the policy: *N years after the case closes* — **3 years** by default (D10,
+`retention_years` variable).
 
-This matches how evidence retention actually works. At ingest you cannot know how long an
-artifact must be kept, but you do know the policy: *N years after the case closes.* Closing a
-case releases the event hold and starts a **3-year** clock (D10, `retention_years` variable).
+**S3 Object Lock has two primitives, not three (A3).** A retention period, and a boolean legal
+hold. There is no "event hold" — earlier drafts of this document named one, and no such thing
+exists to build against. The event-driven behaviour above is therefore assembled from the two
+primitives that do exist:
+
+| When | Action |
+|---|---|
+| At PUT | Legal hold **ON**. No retain-until date is set. The object cannot be deleted and its clock has not started. |
+| At case close | `PutObjectRetention` with `now + retention_years` in the case's mode, **then** release the legal hold. |
+
+The order matters: releasing the hold before setting retention leaves a window in which the
+object is deletable by anything holding `s3:DeleteObject`.
+
+**Legal hold is one boolean serving two purposes**, which is the consequence of there being only
+one of them. It is the event hold for an open case, and it is also the per-case litigation flag
+of D9. Case close releases it *unless* the case record's `legal_hold` attribute is set, in which
+case the object keeps the hold indefinitely and retention runs underneath it. The two meanings
+are distinguished in the manifest, not in S3 — S3 cannot tell them apart, so the case store is
+the only place that can.
 
 A named break-glass role holds `s3:BypassGovernanceRetention` for genuine operator error — for
 example, ingesting the wrong client's data. Per-case **compliance mode** is available for matters
-flagged as litigation or regulatory, applied per object at PUT, since bucket defaults are
-overridden by explicit per-object retention.
-
-**Legal hold** is a per-case flag driving `PutObjectLegalHold` across the case prefix. It is
-independent of retention and persists until explicitly removed.
+flagged as litigation or regulatory, applied per object when retention is set, since bucket
+defaults are overridden by explicit per-object retention.
 
 ### 5.2.1 Compliance-mode guard
 
@@ -426,18 +491,78 @@ second account. It is deferred, and does not gate any earlier phase.
 
 DynamoDB, always on, negligible cost, unaffected by dormancy.
 
-- **`cases`** — case ID, status (open/closed), sketch ID, retention policy, legal hold flag,
-  compliance-mode flag, cost-allocation tag
-- **`artifacts`** — SHA-256, source, size, timestamps, custody events, timeline ID, event count
+- **`cases`** — PK `case_id`. Status (open/closed), opened and closed timestamps, sketch ID,
+  `retention_years`, `object_lock_mode`, legal hold flag, cost-allocation tag
+- **`artifacts`** — PK `case_id`, SK `sha256`. Source, size, timestamps, custody events,
+  timeline ID, event count
+
+**The case store exists because evidence objects are immutable.** Everything worth knowing about
+an artifact changes after it lands — custody events accumulate, the case opens and closes, the
+legal hold flag toggles, retention is set, and phase 3 attaches a timeline ID and an event count.
+None of that can be written onto an object that is under a legal hold from the moment it
+arrives. The manifest is the mutable half of the evidence store, and it is the half that answers
+questions.
+
+Three properties follow from that, and each drives an implementation detail:
+
+- **Deduplication is the manifest write, not a check before it.** The `artifacts` entry is
+  written conditionally on `attribute_not_exists(sha256)`, so a re-uploaded triage package is
+  recognised by the write failing. This is atomic, which a read-then-write check is not — two
+  concurrent intake invocations racing on the same artifact would both pass a prior read.
+  Deduplication is scoped **within a case**: the same file arriving on two engagements is two
+  custody chains, not one.
+- **It must be readable and writable while the environment is dormant**, which disqualifies
+  anything hosted on the appliance. A manifest in the appliance's PostgreSQL would be unavailable
+  for exactly the period between incidents, which is most of the time.
+- **It is the one thing here that cannot be reconstructed.** Evidence can be re-hashed; a custody
+  chain cannot be re-derived. Both tables therefore carry point-in-time recovery and deletion
+  protection, which at this data volume costs nothing worth counting.
+
+S3 has supported conditional writes since late 2024, so atomic deduplication alone would no
+longer require DynamoDB. What S3 still cannot do is answer "every artifact in this case" without
+a LIST and a HEAD per object, hold an append-only custody log against an immutable object, or
+store case-level state that belongs to no single object. The case for a separate manifest is
+narrower than it was; it is not gone.
 
 ### 5.4 Case close
 
 A first-class operation, not a label:
 
-1. Release the Object Lock event hold, starting the retention clock
-2. Optionally drop the OpenSearch index
-3. Transition `.plaso` files to Glacier
-4. Freeze the manifest
+1. Set per-object retention to `now + retention_years` across the case prefix
+2. Release the legal hold — **in that order** (§5.2), and only if the case's `legal_hold`
+   attribute is unset
+3. Optionally drop the OpenSearch index
+4. Transition `.plaso` files to Glacier
+5. Freeze the manifest
+
+### 5.5 Intake recording does not observe posture
+
+The component that records an arriving artifact — read its digest, write the manifest entry,
+copy it to the evidence bucket, apply the legal hold — runs whatever the posture. The pipeline
+that timelines it does not (§3.2). The split is not symmetry for its own sake; the two have
+different dependencies and different failure modes.
+
+The pipeline needs a running appliance, an enabled Batch environment, and interface endpoints,
+all of which dormancy removes. Triggering it while dormant would fail, or worse, half-succeed.
+
+Intake recording needs none of those. It touches S3, DynamoDB, and KMS — none of which dormancy
+touches. Gating it would buy nothing and cost the property the evidence store exists to provide:
+an artifact that arrives between incidents would sit unrecorded and unlocked in a bucket with a
+short expiry lifecycle, and the gap would be silent. "The environment was asleep" is not an
+answer to "why is this artifact not in the manifest".
+
+Two implementation consequences:
+
+- **It runs outside the VPC.** In-VPC placement would put it behind the interface endpoints that
+  dormancy destroys, which would couple chain-of-custody to posture through the back door.
+- **No object bytes pass through it.** It needs `HeadObject` for metadata and `CopyObject`, which
+  S3 executes server-side; it never needs `GetObject`. That is what makes running it outside the
+  VPC a defensible choice rather than a concession — a component that cannot read evidence cannot
+  leak it, wherever it runs.
+
+The copy is the one part with a scale limit: it is driven by a function with a 15-minute ceiling,
+so a sufficiently large artifact will exceed it. The limit is documented and the failure is loud
+rather than silent. Phase 3 moves the copy into Batch, which removes it.
 
 ---
 
@@ -502,6 +627,13 @@ Evidence precedes the pipeline deliberately: integrity guarantees should exist b
 automated begins writing into the store. The trade is a later first end-to-end demo, accepted
 because the environment will not be used on a real incident until phase 3 completes.
 
+**"Manual ingest" in phase 2 means the upload is manual, not the recording.** A responder runs
+`irctl upload` by hand; verification, the manifest entry, the copy to evidence and the legal hold
+are automatic from the moment the object lands (§5.5). What stays manual until phase 3 is
+everything downstream of the evidence bucket — running `log2timeline`, importing the result. The
+line is drawn there so that phase 3 wraps the intake recorder in Step Functions rather than
+replacing it, and so that no artifact is ever knowingly left unrecorded.
+
 ---
 
 ## 10. Deferred — EBS snapshot ingest
@@ -542,6 +674,35 @@ is the AWS collection code, in this phase.
    obligations may need artifacts pinned to a region, which affects bucket and KMS design.
 2. **OpenSearch heap tuning** at `r6i.large`. The 6–8 GiB figure needs measuring against a real
    timeline rather than assuming.
-3. **Cost model.** Dormant cost is estimated at roughly $45/month plus S3, assuming ~500 GB of
-   warm EBS and interface endpoints toggled off. This needs building properly rather than left
-   as an estimate.
+3. **Cost model — partly answered (A5).** The phase 1 acceptance run measured the development
+   deployment rather than the 500 GB assumption this document was drafted against:
+
+   | | Estimated here originally | Measured at phase 1 acceptance |
+   |---|---|---|
+   | Dormant | ~$45/month (assuming 500 GB warm EBS) | **~$15/month** at the 100 GB development volume size |
+   | Active | not broken out | **interface endpoints ~$58/month dominate**, ahead of the `r6i.large` appliance at ~$92/month running continuously |
+   | A full acceptance cycle | not estimated | **about $1** |
+
+   Dormant cost is close to linear in volume size, so the original figure was not wrong so much
+   as quoted at a different volume. The correction that matters is the second row: **interface
+   endpoints, not compute, are the active-cost line to watch**, which is why they are pinned to
+   a single AZ and destroyed when dormant. What remains genuinely open is active cost under a
+   real case, where the plaso fleet and a resized appliance dominate and nothing has been
+   measured.
+
+---
+
+## 12. Amendments
+
+This document is the source of truth, so corrections are made in place rather than in a parallel
+errata file. Each is logged here with what changed and why, so that a reader who remembers an
+earlier reading can tell what moved.
+
+| # | Amendment | Origin |
+|---|---|---|
+| A1 | Hash verification moved from a pipeline step to the PUT itself, using S3's `x-amz-checksum-sha256`. No component re-hashes evidence — the original `VerifyHash` step could not have scaled past what a 15-minute function can stream (§4.1, §4.2) | Phase 2 design |
+| A2 | D13's "upstream `docker-compose` unmodified" holds for the compose *file* but not the *binary*: AL2023 packages no compose plugin and the VPC has no internet, so the binary is mirrored and checksum-verified (D13, §3.3) | Phase 1 acceptance |
+| A3 | S3 Object Lock has no "event hold" primitive. Earlier drafts named one. The behaviour is assembled from a legal hold at PUT plus retention set at case close, in that order (D9, §5.2, §5.4) | Phase 2 design |
+| A4 | Dormancy gates the *pipeline* trigger, not *intake recording*. The original single "Intake EventBridge rule" row conflated two triggers with different dependencies, and disabling both would have left artifacts arriving between incidents silently unrecorded (§3.2, §5.5) | Phase 2 design |
+| A5 | Cost model replaced with measured figures. Dormant ~$15/month at 100 GB; interface endpoints, not the appliance, dominate active cost (§11) | Phase 1 acceptance |
+| A6 | Reactivation has a measured floor of roughly six minutes, set by interface endpoint ENI readiness rather than by the instance. Still "minutes" as D3 promises, but stated rather than discovered (D3, §3.2) | Phase 1 acceptance |

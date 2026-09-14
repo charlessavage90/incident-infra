@@ -3,18 +3,17 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-14, at the end of Phase 1 acceptance.
+**Last updated:** 2026-09-14, at the start of Phase 2.
 
 ---
 
 ## State right now
 
-Phase 1 is built and acceptance-passed against a real AWS account. Phases 2–4 are specified in the
-design but not started.
+Phase 1 is built and acceptance-passed against a real AWS account. **Phase 2 is in progress.**
+Phases 3–4 are specified in the design but not started.
 
-**Open PR: #3** — "Fix six defects found by Phase 1 acceptance against real AWS". CI green.
-Contains the six acceptance fixes plus `CLAUDE.md`/`NEXT.md`. PRs #1 (design + plan) and #2
-(Phase 1 implementation) are merged.
+PRs #1 (design + plan), #2 (Phase 1 implementation) and #3 (six acceptance defects) are all
+merged. Phase 2 work is on `feat/phase-2-evidence-store`.
 
 **The live development environment is DORMANT.** It costs roughly $15/month in that state and
 nothing needs doing to it. What persists:
@@ -39,29 +38,20 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**1. Merge PR #3.** Owner's call; CI is green.
+**~~1. Merge PR #3.~~** Done — merged as `00a14f6`.
 
-**2. Reconcile the spec with what acceptance proved.** Three statements in
-`docs/superpowers/specs/2026-09-14-ir-infrastructure-design.md` are now known to be wrong or
-imprecise, and a future reader will trust them:
+**~~2. Reconcile the spec with what acceptance proved.~~** Done. The design document now carries an
+**§12 Amendments** table and the corrections are made in place rather than in a parallel errata
+file. A2 (compose binary is mirrored), A5 (cost model measured: ~$15/month dormant, endpoints not
+the appliance dominate active cost) and A6 (six-minute reactivation floor) close this item. Phase 2
+design added A1, A3 and A4 at the same time — read §12 before trusting a remembered reading of that
+document.
 
-- **§11 cost model** says "roughly $45/month plus S3" dormant, assuming 500 GB of warm EBS. Measured
-  at the development volume size (100 GB) it is closer to **$15/month**. Active cost is dominated by
-  interface endpoints (~$58/month after the single-AZ change), not the `r6i.large` appliance (~$92).
-  A full acceptance run cost about a dollar.
-- **D13 says "upstream `docker-compose` unmodified"**, which is still true of the compose *file* but
-  now carries a dependency the decision did not anticipate: the compose *binary* must be mirrored,
-  because AL2023 packages none and the VPC has no internet. Worth recording as an amendment rather
-  than silently diverging.
-- **§3.3 / D3 promise "spin-up in minutes"** without qualification. There is a measured floor of
-  about six minutes on reactivation, set by how long a recreated interface endpoint takes to pass
-  traffic. That is still "minutes", but it should be stated rather than discovered.
-
-**3. `docker-compose` is pinned to `v5.5.1` on no evidence.** It was simply the latest release on
+**1. `docker-compose` is pinned to `v5.5.1` on no evidence.** It was simply the latest release on
 the day, and it demonstrably works. Nobody has checked it against what Timesketch's compose file
 actually requires. Cheap to verify, and the kind of thing that silently breaks on a later bump.
 
-**4. PostgreSQL runs `13-alpine`, not the `13.0-alpine` in Timesketch's `config.env`.** Deliberate:
+**2. PostgreSQL runs `13-alpine`, not the `13.0-alpine` in Timesketch's `config.env`.** Deliberate:
 the exact 2020 patch release is not on a non-rate-limited registry, and the §4.5 parity invariant
 concerns the *Timesketch* image, not this one. Note that the **already-mirrored image in ECR is
 still the original `13.0-alpine`**, because the mirror is idempotent and skipped it. A fresh
@@ -88,10 +78,22 @@ the `mkfs` guard never fired.
 
 ---
 
-## Phase 2 — evidence store
+## Phase 2 — evidence store (in progress)
 
-Next phase per spec §9. Delivers S3 buckets, Object Lock, hashing, the case manifest, and manual
-ingest. Done when an artifact can be ingested by hand and is hashed, immutable, and recorded.
+Spec §9. Delivers S3 buckets, Object Lock, hashing, the case manifest, and manual ingest. Done
+when an artifact can be ingested by hand and is hashed, immutable, and recorded.
+
+**Settled during Phase 2 design** (all now in the spec, see §12):
+
+- Everything lands in `modules/platform/`. Nothing in Phase 2 touches `analysis/`, so the posture
+  toggle is unaffected.
+- `irctl` is **Python + boto3**, tested offline with `botocore.Stubber` — the same no-credentials,
+  no-cost discipline as `mock_provider`. Adds a second CI job.
+- The **intake bucket stays** as a quarantine boundary. S3's PUT-time checksum makes it redundant
+  for transfer corruption, but not for an artifact filed against the wrong case, which per-case
+  compliance mode would make permanent.
+- **Manual means the upload is manual.** Verify, manifest, copy and hold are automatic from the
+  moment the object lands; Phase 3 wraps that recorder in Step Functions rather than replacing it.
 
 Carry these forward:
 
@@ -104,13 +106,18 @@ Carry these forward:
   first becomes reachable.
 - **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` will fail against
   any bucket holding locked objects. `AdministratorAccess` covers it, but a scoped role would not.
-- **Retention uses variable retention with an event hold** so the clock starts at case closure, not
-  at upload. Default three years (D10).
-- **Object Lock buckets cannot receive S3 server access logs** — use CloudTrail data events. This
-  also resolves the `SNYK-CC-TF-45` finding currently left visible on the tooling bucket; revisit
-  both Snyk lows once a proper log-target bucket exists.
-- Hashing happens **client-side before upload** and is verified on arrival, which also gives free
-  deduplication (spec §4.2).
+- **Retention is a legal hold at PUT, then `PutObjectRetention` at case close — in that order.**
+  The clock starts at closure, not at upload. Object Lock has no "event hold" primitive; earlier
+  drafts said it did (A3). Default three years (D10).
+- **Object Lock buckets cannot receive S3 server access logs** — use CloudTrail data events, and
+  point them at the tooling bucket too. That gives `SNYK-CC-TF-45` a real compensating control
+  without a second log-target bucket, but the rule looks for `aws_s3_bucket_logging`, so the
+  finding stays visible either way. Decide then whether a scoped ignore is now defensible.
+- Hashing happens **client-side before upload**, and S3 verifies it **at PUT** via
+  `x-amz-checksum-sha256` rather than in a pipeline step (A1). Nothing re-hashes evidence — a
+  15-minute function cannot stream a 20 GB triage package. Multipart stores a composite
+  `<hash>-N`, so the whole-file digest also goes in object metadata and the manifest, which is
+  what deduplication keys on (spec §4.2).
 
 ---
 
