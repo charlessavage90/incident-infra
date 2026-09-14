@@ -13,7 +13,7 @@ often a great deal of it. That analysis needs infrastructure — a timeline data
 processing capacity, and durable evidence storage — which is expensive to keep running between
 incidents and slow to build under pressure.
 
-This project delivers a Terraform module that stands up a complete incident-response analysis
+This project delivers an OpenTofu module that stands up a complete incident-response analysis
 environment in AWS, holds it in a low-cost dormant state between incidents, and returns it to
 service in minutes.
 
@@ -50,11 +50,12 @@ tell a deliberate choice from an accident.
 | D8 | Default sizing targets 100 GB–1 TB per incident, 3–6 responders | Single-box-fits-all; large-scale-from-day-one |
 | D9 | Evidence uses Object Lock in governance mode under an event hold; compliance mode available per case | Compliance mode everywhere; no Object Lock |
 | D10 | Retention is 3 years, starting when a case closes | 7 years; 1 year; no default |
-| D11 | A case is a data concept (sketch + prefix + record), not an infrastructure concept | A Terraform stack per case; hybrid per-case analysis stacks |
+| D11 | A case is a data concept (sketch + prefix + record), not an infrastructure concept | An OpenTofu stack per case; hybrid per-case analysis stacks |
 | D12 | Intake is a responder CLI push to S3 | Presigned URLs for third parties; cross-account pull; web upload |
 | D13 | EC2 appliance running upstream `docker-compose`, plus an elastic plaso fleet | Everything on one box; fully managed services |
 | D14 | plaso runs on AWS Batch, EC2 on-demand | Batch on Spot; Fargate tasks with attached EBS |
 | D15 | Step Functions orchestrates; dfTimewolf is reserved for the EBS snapshot phase | dfTimewolf as the outer orchestrator |
+| D16 | OpenTofu (MPL-2.0) is the IaC tool; HCL is Terraform-compatible | Terraform (BUSL), given D1's intent to open-source |
 
 ---
 
@@ -62,7 +63,7 @@ tell a deliberate choice from an accident.
 
 ### 3.1 Layering
 
-Two Terraform layers with independent state.
+Two OpenTofu layers with independent state.
 
 **`platform/` — permanent.** Never destroyed in normal operation.
 
@@ -91,7 +92,7 @@ belongs to neither layer: it runs outside the VPC, is unaffected by dormancy, an
 its own cadence when upstream images are refreshed.
 
 Placing the **EBS data volumes in the permanent layer** is load-bearing. It means a full
-`terraform destroy` of `analysis/` loses no warm data — indices and evidence sit on the other
+`tofu destroy` of `analysis/` loses no warm data — indices and evidence sit on the other
 side of the boundary. This yields a colder dormancy tier later at no additional design cost.
 
 ### 3.2 Dormancy
@@ -183,7 +184,7 @@ that workload. The resize path is the release valve, and sizing guidance must sa
 
 A separate encrypted gp3 data volume (default 500 GB) holds OpenSearch and PostgreSQL data.
 
-`timesketch.conf` is templated by Terraform; secrets come from Secrets Manager. Responder
+`timesketch.conf` is templated by OpenTofu; secrets come from Secrets Manager. Responder
 accounts are provisioned on activation from a `responders` variable via `tsctl create-user`,
 with generated passwords written to Secrets Manager. Adding a responder mid-incident is one
 apply.
@@ -365,6 +366,62 @@ overridden by explicit per-object retention.
 **Legal hold** is a per-case flag driving `PutObjectLegalHold` across the case prefix. It is
 independent of retention and persists until explicitly removed.
 
+### 5.2.1 Compliance-mode guard
+
+Compliance mode is the only genuinely irreversible action in this module. A compliance-locked
+object cannot be deleted before its retain-until date by any principal including the account
+root; AWS documents the sole escape as **deleting the AWS account**. An Object Lock bucket also
+cannot be emptied or destroyed while locked objects remain, so `tofu destroy` fails against one.
+
+The module therefore refuses compliance mode unless the caller opts in explicitly:
+
+```hcl
+variable "object_lock_mode" {
+  type        = string
+  default     = "GOVERNANCE"
+  description = "GOVERNANCE (reversible by a break-glass role) or COMPLIANCE (irreversible)."
+}
+
+variable "acknowledge_compliance_mode_is_irreversible" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Required to be true when object_lock_mode is COMPLIANCE. Compliance-locked objects cannot be
+    deleted before expiry by anyone, including the account root, and the bucket cannot be
+    destroyed while they exist. Never set this in a development or sandbox account.
+  EOT
+}
+```
+
+A precondition fails the plan when `COMPLIANCE` is requested without the acknowledgement. The
+per-case compliance escalation described above is subject to the same guard.
+
+### 5.2.2 Developing against a non-dedicated account
+
+D2 requires a dedicated IR account for *production*. Development does not: nothing in phases 1–4
+needs a second account, and the isolation property is a deployment characteristic rather than
+module behaviour. A standard or sandbox account is a fine development target, subject to four
+constraints.
+
+1. **Never enable compliance mode in a development account.** This is the one mistake with no
+   remedy. A test that writes a large artifact under compliance mode with a three-year retention
+   commits that storage cost for three years. §5.2.1 exists to make this hard to do by accident.
+2. **Governance mode is safely destroyable, but only by a principal holding
+   `s3:BypassGovernanceRetention`.** The development role must hold it, or teardown will fail on
+   any bucket containing locked objects.
+3. **Watch idle cost.** VPC interface endpoints bill hourly whether used or not and are the
+   largest avoidable line item in a half-built environment. Set a budget alarm before the first
+   apply rather than after the first surprise; the auto-dormancy nudge does not arrive until
+   phase 4.
+4. **Check Batch service quotas.** On-demand EC2 vCPU limits in an account that has never run
+   large instances may be lower than the plaso fleet needs.
+
+Bucket names are globally unique, so a `name_prefix` variable must be applied to every bucket to
+avoid collisions between a development and a production deployment.
+
+Cross-account EBS snapshot copy (§10) is the one capability that will eventually require a
+second account. It is deferred, and does not gate any earlier phase.
+
 ### 5.3 Case store
 
 DynamoDB, always on, negligible cost, unaffected by dormancy.
@@ -392,7 +449,7 @@ In scope:
   works end to end. Infrastructure touched only during incidents is infrastructure that is broken
   during incidents.
 - **Auto-dormancy nudge and budget alarm.** A scheduled check notifies after `idle_days` rather
-  than mutating infrastructure behind Terraform's back — auto-apply would cause state drift. This
+  than mutating infrastructure behind OpenTofu's back — auto-apply would cause state drift. This
   guards against a deployment left running for a quarter.
 - **Per-case cost attribution.** Cost allocation tags applied at resource creation, plus a
   per-case view. Cheap to build in, awkward to retrofit.
@@ -422,8 +479,8 @@ incident-infra/
 
 ## 8. Testing
 
-- `terraform validate`, `tflint`, `checkov`, and Snyk IaC in CI
-- Native `terraform test` for module contracts
+- `tofu validate`, `tflint`, `checkov`, and Snyk IaC in CI
+- Native `tofu test` for module contracts
 - **CI assertion of plaso version parity** between the worker image and the appliance image
 - End-to-end acceptance test, which is the test that matters:
 
