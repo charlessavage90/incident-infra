@@ -1,0 +1,57 @@
+version: 0.2
+
+# Mirrors upstream container images into ECR and publishes each one's immutable
+# digest to SSM. The appliance and (from Phase 3) the plaso worker both consume
+# those digests, which is what makes the spec 4.5 version-parity invariant hold:
+#
+#   The plaso that produces a timeline and the plaso that ingests it are the
+#   same binary.
+#
+# Timesketch installs plaso-tools UNPINNED from ppa:gift, so two builds of the
+# same Timesketch release tag can contain different plaso versions. Pinning by
+# tag is therefore not sufficient; only a digest is.
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  build:
+    commands:
+      - |
+        set -euo pipefail
+
+        mirror() {
+          repo_url="$1"; upstream="$2"; ssm_key="$3"
+          echo "== mirroring $upstream -> $repo_url:$IMAGE_TAG"
+
+          docker pull "$upstream"
+          docker tag "$upstream" "$repo_url:$IMAGE_TAG"
+          docker push "$repo_url:$IMAGE_TAG"
+
+          # repository_url is <registry>/<prefix>/<name>; the ECR API wants
+          # everything after the registry host.
+          repo_name="${repo_url#*/}"
+
+          digest=$(aws ecr describe-images \
+            --repository-name "$repo_name" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)
+
+          if [ -z "$digest" ] || [ "$digest" = "None" ]; then
+            echo "FATAL: could not resolve a digest for $repo_name:$IMAGE_TAG" >&2
+            exit 1
+          fi
+
+          aws ssm put-parameter \
+            --name "/$NAME_PREFIX/images/$ssm_key" \
+            --type String --overwrite \
+            --value "$repo_url@$digest"
+
+          echo "   $ssm_key -> $repo_url@$digest"
+        }
+
+        mirror "$ECR_TIMESKETCH" "us-docker.pkg.dev/osdfir-registry/timesketch/timesketch:$TIMESKETCH_VERSION" timesketch
+        mirror "$ECR_OPENSEARCH" "opensearchproject/opensearch:$OPENSEARCH_VERSION"                             opensearch
+        mirror "$ECR_POSTGRES"   "postgres:$POSTGRES_VERSION"                                                   postgres
+        mirror "$ECR_REDIS"      "redis:$REDIS_VERSION"                                                         redis
+        mirror "$ECR_NGINX"      "nginx:$NGINX_VERSION"                                                         nginx
