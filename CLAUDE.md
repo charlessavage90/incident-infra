@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+For what the *next* session should pick up — open items, phase-specific context, and the state of
+the live development environment — see `NEXT.md`.
+
 ## What this is
 
 An OpenTofu module that stands up an incident-response analysis environment in a dedicated AWS
@@ -132,18 +135,80 @@ is a systemd unit.
 `set -x` is on throughout, so anything handling a secret must be wrapped in `set +x` / `set -x`.
 Responder passwords leaked into `/var/log/cloud-init-output.log` until that was added.
 
+## Upstream facts worth not rediscovering
+
+All verified against upstream sources during design; each shaped a decision.
+
+### plaso
+
+- Roughly **200 supported formats**: Windows registry/EVTX/`$MFT`/`$UsnJrnl`/prefetch/LNK, browser
+  history, macOS plists and keychains, Linux syslog/utmp, and a lot of *server and application*
+  logs (Apache, IIS, PostgreSQL, vsftpd, Snort/Suricata, Windows Firewall, McAfee, Symantec, Sophos).
+  The reflex "just run plaso at it" is usually right.
+- **No generic CSV or JSON parser exists.** `plaso/parsers/dsv_parser.py` is an *abstract base
+  class* whose `COLUMNS` list "needs to be defined by each DSV parser"; concrete parsers such as
+  `SymantecParser` subclass it, and a `_MAGIC_TEST_STRING` sniff test rejects non-conforming files.
+- Its JSON-L support is nine schema-specific parsers, including `aws_cloudtrail_log`,
+  `azure_activity_log`, `gcp_log`, and `microsoft_audit_log`. So plaso covers more cloud than
+  expected — but **no Okta, no Entra sign-in logs, no Google Workspace**.
+- `log2timeline` auto-detects, so the pipeline routes by extension rather than classifying (D4).
+
+### Timesketch
+
+- Auth is **local accounts, `SSO_ENABLED` (trusting a `REMOTE_USER` env var set by a fronting web
+  server), or `GOOGLE_OIDC_*`** (generic despite the name — discovery URL, client id/secret and
+  algorithm are all configurable). There is **no AWS IAM integration, no SAML, no LDAP**. SSM
+  authenticates the tunnel, never the application.
+- `LOCAL_AUTH_ALLOWED_USERS` keeps named local accounts working even when OIDC is enabled. That is
+  the break-glass hook if federated ingress is ever added.
+- Direct import needs three fields: `message`, `datetime` (ISO 8601), `timestamp_desc`. The web UI
+  can map arbitrary columns onto them, combine columns, and supply defaults — which is why v1 ships
+  no pre-built normalizers (D5).
+- The release image installs `plaso-tools`, so **it already contains `log2timeline.py`**. The
+  `timesketch-worker` service uses the *same image* as `timesketch-web`, with a different command.
+- Upstream pins live in `docker/release/config.env`; `OPENSEARCH_MEM_USE_GB` is RAM/2 capped at
+  32 GB and `NUM_WSGI_WORKERS` is `(cores * 2) + 1`. Both are derived from `instance_type` in
+  `appliance.tf`, so resizing needs no other change.
+- The API client (`timesketch_api_client`) is **not** installed in the web container. Scripted
+  interaction means the REST API with a session cookie and CSRF token.
+
+### AWS behaviours that drove decisions
+
+- **S3 Object Lock can be enabled on an existing bucket**, not only at creation — but it can never
+  be disabled afterwards, and versioning can never be suspended.
+- Object Lock supports **variable retention with an event hold**: the retain-until date is computed
+  when the hold is *released*, which is what lets retention start at case closure rather than at
+  upload (D9/D10).
+- **Object Lock buckets cannot receive S3 server access logs.** Bucket auditing must use CloudTrail
+  data events.
+- Interface endpoints bill **per ENI — per endpoint, per AZ**. They are deliberately placed in one
+  AZ, matching the appliance, which halves the largest active-cost line.
+- ECR Public carries `docker/library/*` mirrors of Docker Hub official images and
+  `opensearchproject/opensearch`. It does **not** carry `postgres:13.0-alpine` (a 2020 patch
+  release); `13-alpine` is the nearest equivalent.
+- AL2023 packages `docker` (25.0.x) and `nvme-cli`, and **no compose plugin of any kind** —
+  `dnf search compose` returns only unrelated packages.
+- Fargate tops out at 32 vCPU / 244 GB and can attach EBS volumes at task launch, so its old
+  200 GiB ephemeral cap is not the constraint it once was (relevant to D14's revisit).
+
 ## Testing conventions
 
 - **Use `jsonencode`, not `aws_iam_policy_document`.** The data source's rendered `.json` is a
   computed attribute that `mock_provider` replaces with an invented string — which both fails
   provider validation at plan time and makes any assertion about policy content a test of the mock
   rather than of the module.
-- Mocks must supply anything the provider validates (ARNs especially) and anything returned as a
-  list (`aws_availability_zones.names` comes back empty otherwise).
 - OpenTofu 1.12 has **no** `source` argument on `mock_provider`, so the mock block is duplicated
   across each module's test files. Keep them in sync.
-- Assertions should name the consequence, not the rule. The failure message is what a future
-  reader gets at 2am.
+- Mocks must supply anything the provider *validates* and anything returned as a *list*. Known
+  necessities: `aws_availability_zones.names` (empty otherwise), and ARNs for `aws_kms_key`,
+  `aws_ecr_repository`, `aws_iam_role`; plus `aws_subnet.availability_zone`, `aws_ami.id`,
+  `aws_ssm_parameter.value`, `aws_caller_identity.account_id`, `aws_region.region`.
+- `lifecycle` is a meta-argument and **cannot be read in an assertion**. Assert the property it
+  protects instead.
+- `expect_failures` accepts a variable (`[var.posture]`) for validation blocks and a resource
+  (`[aws_instance.appliance]`) for preconditions.
+- Assertions should name the consequence, not the rule. The failure message is what a future reader
+  gets at 2am.
 
 ## Working against a real account
 
@@ -160,12 +225,47 @@ Development does not need a dedicated IR account; nothing in phases 1–4 requir
   the development role will need from Phase 2 onwards or teardown fails.
 - Set `budget_alert_emails` before the first apply. The auto-dormancy nudge is Phase 4, so until
   then the budget alarm is the only signal that the environment was left running.
-- Interface endpoints bill per ENI *per AZ* and are the largest active cost. They are deliberately
-  placed in one AZ only, matching the appliance.
+- Interface endpoints are the largest active cost — larger than the appliance itself before they
+  were narrowed to one AZ.
 
 **Local state files contain generated secrets in plaintext.** `envs/example/*/terraform.tfstate`
 holds the `random_password` results. They are gitignored; keep it that way, and do not paste their
 contents anywhere.
+
+**Development credentials are a long-lived IAM access key with `AdministratorAccess`, not SSO.**
+Run `aws sts get-caller-identity` to see what you are. That shape is acceptable for a sandbox and
+is explicitly *not* acceptable for the production IR account: D2 and the break-glass property in
+§3.5 assume IR access survives compromise of everything else, and a static admin key on a
+workstation is the opposite of that.
+
+## Operating from Windows / Git Bash
+
+Every one of these cost real time.
+
+- **`tofu` is only on PATH in login shells.** Prepend the winget package directory in any
+  non-login subshell.
+- **`MSYS_NO_PATHCONV=1`** is required for any AWS CLI argument that looks like a POSIX path. Git
+  Bash rewrites `/ir-dev/images` into a Windows path and SSM returns a parameter-name validation
+  error that does not mention path conversion.
+- **`PYTHONIOENCODING=utf-8 PYTHONUTF8=1`** avoids `'charmap' codec can't encode` failures when AWS
+  CLI output contains non-ASCII.
+- Git Bash `/tmp` and Windows Python's `/tmp` are different places. Use the session scratchpad
+  directory for intermediate files.
+- `grep -P` is available; `grep '\t'` is not interpreted as a tab (use `grep -P '^\t'`).
+- **`aws ssm send-command` parameter JSON is painful to escape.** The reliable pattern is to write
+  the script locally, base64-encode it, and send one command:
+  `echo <b64> | base64 -d > /root/x.sh && bash /root/x.sh`.
+- Results come from `aws ssm get-command-invocation` and need roughly 20–25 seconds after sending.
+
+## Repository workflow
+
+- `.gitattributes` forces LF. Shell scripts committed with CRLF fail on Linux runners with
+  `bad interpreter`, which would break CI on the first push.
+- `.terraform.lock.hcl` is committed deliberately; `.terraform/`, state, and `*.tfvars` are not.
+- **Merging a PR with `--delete-branch` closes any stacked PR based on that branch**, and GitHub
+  does not auto-retarget it. Retarget the child (`gh pr edit N --base main`) *before* merging the
+  parent. Recovering afterwards means pushing the deleted branch back, reopening, retargeting, then
+  merging.
 
 ## Snyk
 
