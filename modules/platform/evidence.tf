@@ -117,3 +117,88 @@ resource "aws_s3_bucket_public_access_block" "plaso" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
+
+# Intake: the quarantine boundary (spec 5.1).
+#
+# S3 verifies the client's SHA-256 at PUT (spec 4.2), so this bucket is no
+# longer where transfer corruption is caught -- that never reaches storage. What
+# it still catches is an artifact that transferred perfectly and is filed against
+# the wrong case. Under GOVERNANCE the break-glass role can undo that; under the
+# per-case COMPLIANCE mode of spec 5.2 nobody can. One server-side copy is a
+# cheap price for somewhere to be wrong.
+#
+# Deliberately NOT Object Lock and NOT versioned: the recorder deletes what it
+# has filed, and a locked intake bucket would defeat the purpose.
+resource "aws_s3_bucket" "intake" {
+  bucket = "${var.name_prefix}-intake-${data.aws_caller_identity.current.account_id}"
+
+  tags = merge(local.common_tags, {
+    Name    = "${var.name_prefix}-intake"
+    Content = "unverified-landing-zone"
+  })
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "intake" {
+  bucket = aws_s3_bucket.intake.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.main.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "intake" {
+  bucket = aws_s3_bucket.intake.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "intake" {
+  bucket = aws_s3_bucket.intake.id
+
+  rule {
+    id     = "expire-unrecorded-artifacts"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = var.intake_expiry_days
+    }
+
+    # An abandoned multipart upload is billed storage that no object listing
+    # shows. Uploads here are large and interruptible, so this matters.
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "intake" {
+  bucket = aws_s3_bucket.intake.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.intake.arn,
+          "${aws_s3_bucket.intake.arn}/*",
+        ]
+        Condition = {
+          Bool = { "aws:SecureTransport" = "false" }
+        }
+      },
+    ]
+  })
+}

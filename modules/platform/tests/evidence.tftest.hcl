@@ -154,3 +154,42 @@ run "object_lock_mode_rejects_an_unknown_value" {
 
   expect_failures = [var.object_lock_mode]
 }
+
+# Intake is a quarantine boundary, not storage. The recorder deletes what it
+# files, so anything still here after the window failed and wants investigating.
+run "intake_bucket_expires_its_contents" {
+  command = plan
+
+  # Projected attribute-by-attribute rather than via one(rule): reading the whole
+  # rule object pulls in its deprecated `prefix` and emits a warning on a
+  # perfectly good config.
+  assert {
+    condition     = one([for r in aws_s3_bucket_lifecycle_configuration.intake.rule : one(r.expiration).days]) == 7
+    error_message = "Intake must expire, or a failed recording sits in a mutable bucket indefinitely."
+  }
+
+  assert {
+    condition     = one([for r in aws_s3_bucket_lifecycle_configuration.intake.rule : one(r.abort_incomplete_multipart_upload).days_after_initiation]) == 7
+    error_message = "An abandoned multipart upload is billed storage that no listing shows. Abort it."
+  }
+}
+
+# Intake is NOT Object Lock: an artifact must be deletable until it has been
+# verified and filed against a real case.
+run "intake_bucket_is_not_locked" {
+  command = plan
+
+  assert {
+    condition     = aws_s3_bucket.intake.object_lock_enabled == false
+    error_message = "Locking intake would make a mis-filed artifact permanent, which is the exact failure the quarantine exists to prevent."
+  }
+}
+
+run "intake_bucket_refuses_plaintext_transport" {
+  command = plan
+
+  assert {
+    condition     = length([for s in jsondecode(aws_s3_bucket_policy.intake.policy).Statement : s if s.Sid == "DenyInsecureTransport"]) == 1
+    error_message = "Evidence must not cross the wire in plaintext."
+  }
+}
