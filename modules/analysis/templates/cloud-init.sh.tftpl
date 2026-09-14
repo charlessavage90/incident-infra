@@ -1,0 +1,116 @@
+#!/bin/bash
+# Managed by OpenTofu. Runs on EVERY boot, including every dormant -> active
+# transition. Everything here must be idempotent.
+set -euxo pipefail
+
+REGION="${region}"
+
+# --- GOTCHA 1: OpenSearch refuses to start without this ---
+#
+# The default vm.max_map_count is 65530; OpenSearch requires 262144. Written to
+# /etc/sysctl.d so it survives the stop/start cycles that dormancy performs -
+# setting it only with `sysctl -w` would be lost on the next activation.
+echo 'vm.max_map_count=262144' > /etc/sysctl.d/99-opensearch.conf
+sysctl -p /etc/sysctl.d/99-opensearch.conf
+
+dnf install -y docker nvme-cli
+systemctl enable --now docker
+
+# Compose v2 as a CLI plugin.
+dnf install -y docker-compose-plugin
+
+# --- GOTCHA 2: NVMe device naming on Nitro instances ---
+#
+# The volume is attached as /dev/sdf, but on Nitro instances (r6i and friends)
+# the OS sees an NVMe device whose number is not predictable and can change
+# between boots. Guessing /dev/nvme1n1 works until the day it does not. Resolve
+# by volume ID instead.
+VOLUME_ID_NODASH=$(echo "${data_volume_id}" | tr -d '-')
+DEVICE=""
+for _ in $(seq 1 30); do
+  for candidate in /dev/nvme*n1; do
+    [ -e "$candidate" ] || continue
+    if nvme id-ctrl -v "$candidate" 2>/dev/null | grep -q "$VOLUME_ID_NODASH"; then
+      DEVICE="$candidate"
+      break 2
+    fi
+  done
+  sleep 2
+done
+
+# Fallback: the by-id symlink Amazon Linux provides.
+if [ -z "$DEVICE" ] && [ -e "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$VOLUME_ID_NODASH" ]; then
+  DEVICE="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$VOLUME_ID_NODASH"
+fi
+
+if [ -z "$DEVICE" ]; then
+  echo "FATAL: could not locate data volume ${data_volume_id}" >&2
+  exit 1
+fi
+echo "data volume ${data_volume_id} is $DEVICE"
+
+# --- GOTCHA 3: the format must be guarded ---
+#
+# cloud-init runs on every boot and dormancy stops and starts this instance
+# repeatedly. An unguarded mkfs would destroy every timeline and every piece of
+# evidence on the SECOND activation. This guard is the single most important
+# line in the file.
+if ! blkid "$DEVICE"; then
+  echo "no filesystem on $DEVICE - first boot, creating one"
+  mkfs.ext4 -L irdata "$DEVICE"
+else
+  echo "filesystem present on $DEVICE - preserving it"
+fi
+
+mkdir -p /mnt/data
+grep -q "LABEL=irdata" /etc/fstab || echo "LABEL=irdata /mnt/data ext4 defaults,nofail 0 2" >> /etc/fstab
+mount -a
+
+mkdir -p /mnt/data/opensearch /mnt/data/postgresql /mnt/data/upload
+
+# OpenSearch runs as uid 1000 inside its container.
+chown -R 1000:1000 /mnt/data/opensearch /mnt/data/upload
+chmod 700 /mnt/data/postgresql
+
+# --- Application config and digest-pinned images (spec 4.5) ---
+
+mkdir -p /opt/timesketch/etc
+
+cat > /opt/timesketch/etc/timesketch.conf <<'TIMESKETCH_CONF_EOF'
+${timesketch_conf}
+TIMESKETCH_CONF_EOF
+chmod 600 /opt/timesketch/etc/timesketch.conf
+
+cat > /opt/timesketch/docker-compose.yml <<'COMPOSE_EOF'
+${docker_compose}
+COMPOSE_EOF
+
+aws ecr get-login-password --region "$REGION" \
+  | docker login --username AWS --password-stdin "${ecr_registry}"
+
+cd /opt/timesketch
+docker compose up -d
+
+# --- Responder accounts (idempotent) ---
+
+echo "waiting for timesketch-web"
+for _ in $(seq 1 60); do
+  if docker compose exec -T timesketch-web tsctl list-users >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+%{ for user in responders ~}
+if ! docker compose exec -T timesketch-web tsctl list-users 2>/dev/null | grep -qx "${user}"; then
+  echo "creating Timesketch user ${user}"
+  PW=$(aws secretsmanager get-secret-value --region "$REGION" \
+    --secret-id "${name_prefix}/responders/${user}" \
+    --query SecretString --output text)
+  docker compose exec -T timesketch-web tsctl create-user "${user}" --password "$PW"
+else
+  echo "Timesketch user ${user} already exists"
+fi
+%{ endfor ~}
+
+echo "appliance ready"

@@ -1,0 +1,25 @@
+# Snyk policy file. Suppressions are deliberate and justified; do not add one
+# without a reason a reviewer can evaluate.
+version: v1.25.0
+
+ignore:
+  SNYK-CC-AWS-426:
+    - "*":
+        reason: >-
+          EC2 API termination protection is deliberately not enabled on the
+          Timesketch appliance. The appliance is stateless by design: all
+          persistent state (OpenSearch indices, PostgreSQL) lives on the EBS
+          data volume owned by the platform layer, which carries
+          prevent_destroy = true. Accidental termination therefore costs a
+          re-apply, not evidence.
+
+          Enabling it would actively break two documented workflows. The
+          appliance uses user_data_replace_on_change = true, so a template
+          change replaces the instance; and instance_type is specified as a
+          per-incident dial that responders raise for a large case and drop
+          back afterwards. Snyk's own guidance notes this rule "may prevent
+          IaC workflows from updating the instance".
+
+          Revisit if the appliance ever holds state of its own.
+        expires: 2027-09-14T00:00:00.000Z
+        created: 2026-09-14T00:00:00.000Z

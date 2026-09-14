@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.6
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.52.0
+
+      # fmt, validate, lint, and tofu test. Same script developers run locally,
+      # so CI cannot disagree with a clean local run.
+      #
+      # All tests use mock_provider: no AWS credentials, no network, no cost.
+      - name: check
+        run: bash scripts/check.sh check
