@@ -52,8 +52,16 @@ test_modules() {
   done
 }
 
+ANALYSIS_ENV="envs/example/analysis"
+
+posture() {
+  local want="$1"
+  echo "== setting posture=$want in $ANALYSIS_ENV"
+  (cd "$ANALYSIS_ENV" && tofu apply -var="posture=$want")
+}
+
 usage() {
-  echo "usage: $0 {fmt|fmt-check|validate|lint|test|check}" >&2
+  echo "usage: $0 {fmt|fmt-check|validate|lint|test|check|dormant|active}" >&2
   exit 2
 }
 
@@ -64,5 +72,7 @@ case "${1:-check}" in
   lint)      lint ;;
   test)      test_modules ;;
   check)     fmt_check; validate; lint; test_modules ;;
+  dormant)   posture dormant ;;
+  active)    posture active ;;
   *)         usage ;;
 esac

@@ -17,3 +17,9 @@ test:
 
 check:
 	@bash scripts/check.sh check
+
+dormant:
+	@bash scripts/check.sh dormant
+
+active:
+	@bash scripts/check.sh active

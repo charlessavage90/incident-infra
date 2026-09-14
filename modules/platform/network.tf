@@ -118,8 +118,32 @@ resource "aws_vpc_endpoint" "s3" {
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private.id]
 
+  # Without an explicit policy an endpoint is usable by any principal that can
+  # reach it, including principals outside this account. Scope it to this
+  # account: from Phase 2 this endpoint carries evidence, and the IR account is
+  # deliberately isolated from the environment under investigation (D2).
+  #
+  # Not narrowed to specific buckets, because this endpoint also serves ECR
+  # image-layer pulls from AWS-owned buckets whose names are region-specific.
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "*"
+      Resource  = "*"
+      Condition = {
+        StringEquals = {
+          "aws:PrincipalAccount" = data.aws_caller_identity.current.account_id
+        }
+      }
+    }]
+  })
+
   tags = merge(local.common_tags, { Name = "${var.name_prefix}-s3" })
 }
+
+data "aws_caller_identity" "current" {}
 
 # --- Appliance security group: the attachment surface (spec 3.3) ---
 #

@@ -17,6 +17,12 @@ mock_provider "aws" {
     }
   }
 
+  mock_data "aws_subnet" {
+    defaults = {
+      availability_zone = "us-east-1a"
+    }
+  }
+
   mock_data "aws_ami" {
     defaults = {
       id = "ami-00000000000000000"
@@ -183,4 +189,17 @@ run "dns_record_points_at_the_appliance" {
     condition     = aws_route53_record.timesketch.name == "timesketch.ir.internal"
     error_message = "Connector app segments reference this name; it must be stable."
   }
+}
+
+# The guard must actually fire. An unused variable would lint clean but leave
+# the AZ mismatch to surface as an opaque volume-attachment failure.
+run "az_mismatch_is_caught_before_apply" {
+  command = plan
+
+  variables {
+    posture                       = "active"
+    data_volume_availability_zone = "us-east-1c"
+  }
+
+  expect_failures = [aws_instance.appliance]
 }

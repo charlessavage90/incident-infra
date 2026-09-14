@@ -17,6 +17,12 @@ mock_provider "aws" {
     }
   }
 
+  mock_data "aws_subnet" {
+    defaults = {
+      availability_zone = "us-east-1a"
+    }
+  }
+
   mock_data "aws_ami" {
     defaults = {
       id = "ami-00000000000000000"

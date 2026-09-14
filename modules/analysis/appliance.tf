@@ -1,3 +1,7 @@
+data "aws_subnet" "appliance" {
+  id = var.private_subnet_ids[0]
+}
+
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -97,6 +101,16 @@ resource "aws_instance" "appliance" {
   user_data_replace_on_change = true
 
   tags = merge(local.common_tags, { Name = "${var.name_prefix}-appliance" })
+
+  lifecycle {
+    # EBS attaches only within one availability zone. Without this check the
+    # mismatch surfaces later, as a volume-attachment failure whose message does
+    # not mention availability zones at all.
+    precondition {
+      condition     = data.aws_subnet.appliance.availability_zone == var.data_volume_availability_zone
+      error_message = "Appliance subnet is in ${data.aws_subnet.appliance.availability_zone} but the data volume is in ${var.data_volume_availability_zone}. EBS attaches only within one AZ."
+    }
+  }
 }
 
 resource "aws_volume_attachment" "data" {

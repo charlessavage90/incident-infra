@@ -58,5 +58,24 @@ resource "aws_vpc_endpoint" "interface" {
   security_group_ids  = [aws_security_group.endpoints.id]
   private_dns_enabled = true
 
+  # Without an explicit policy an endpoint is usable by any principal that can
+  # reach it, including principals outside this account. Scope it to this
+  # account: the IR account is deliberately isolated from the environment under
+  # investigation (D2), and an endpoint open to other accounts undercuts that.
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "*"
+      Resource  = "*"
+      Condition = {
+        StringEquals = {
+          "aws:PrincipalAccount" = data.aws_caller_identity.current.account_id
+        }
+      }
+    }]
+  })
+
   tags = merge(local.common_tags, { Name = "${var.name_prefix}-${each.key}" })
 }
