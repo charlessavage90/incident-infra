@@ -111,6 +111,26 @@ internet, so `modules/images` fetches the binary in CodeBuild, checksums it agai
 published `.sha256`, and stores it in the tooling bucket. The appliance re-verifies the checksum
 before making it executable. Phase 3 should reuse this path for plaso tooling.
 
+The pinned `v5.5.1` is far above what the stack needs. **Our compose file's floor is Compose
+v2.0** — it uses no `version:` key, list-form `depends_on`, `ulimits`, and short-syntax ports and
+volumes, and nothing newer. Bumping the pin is low-risk *on its own*.
+
+**But the pin and our divergence from upstream protect each other, which is the trap.** Compose
+v5.0.0 made a service depending on a profile-disabled service a hard error (`service X is
+required by Y, but is disabled`). Upstream Timesketch's compose file uses profiles heavily
+(`legacy-ui`, `v3-ui`, `telemetry`); ours has none, which is the only reason a v5 compose runs it
+at all. Re-syncing our compose file toward upstream is safe. Bumping compose is safe. **Doing
+both is not**, and neither change looks dangerous in isolation.
+
+**Our compose file is derived from upstream's, not a copy of it** — D13 says "unmodified" and is
+wrong (spec A2). Against the pinned `20260630` tag we drop `nginx` (the web container binds to
+loopback and is reached over SSM), drop the profiled services, substitute digests for tags, and
+repoint volumes at the data volume. Those are all deliberate. One is not: upstream gives
+`opensearch`, `postgres` and `redis` healthchecks and has the web and worker services wait on
+`condition: service_healthy`. Ours uses plain list-form `depends_on`, so Timesketch starts when
+those containers *start* rather than when they are *ready*. `restart: always` masks it, which is
+why acceptance passed.
+
 **The mirror must stay idempotent.** Tags are immutable, so re-pushing fails; the buildspec skips
 images already present. Sources are ECR Public, not Docker Hub, which rate-limits anonymous pulls
 per IP and broke the mirror in practice.

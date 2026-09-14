@@ -52,7 +52,7 @@ tell a deliberate choice from an accident.
 | D10 | Retention is 3 years, starting when a case closes | 7 years; 1 year; no default |
 | D11 | A case is a data concept (sketch + prefix + record), not an infrastructure concept | An OpenTofu stack per case; hybrid per-case analysis stacks |
 | D12 | Intake is a responder CLI push to S3 | Presigned URLs for third parties; cross-account pull; web upload |
-| D13 | EC2 appliance running upstream `docker-compose`, plus an elastic plaso fleet. The compose *file* is upstream's, unmodified; the compose *binary* is mirrored (A2) | Everything on one box; fully managed services |
+| D13 | EC2 appliance running a compose stack derived from upstream Timesketch's, plus an elastic plaso fleet. "Unmodified" was never accurate — see A2 for the delta and why each part of it exists | Everything on one box; fully managed services |
 | D14 | plaso runs on AWS Batch, EC2 on-demand | Batch on Spot; Fargate tasks with attached EBS |
 | D15 | Step Functions orchestrates; dfTimewolf is reserved for the EBS snapshot phase | dfTimewolf as the outer orchestrator |
 | D16 | OpenTofu (MPL-2.0) is the IaC tool; HCL is Terraform-compatible | Terraform (BUSL), given D1's intent to open-source |
@@ -701,7 +701,7 @@ earlier reading can tell what moved.
 | # | Amendment | Origin |
 |---|---|---|
 | A1 | Hash verification moved from a pipeline step to the PUT itself, using S3's `x-amz-checksum-sha256`. No component re-hashes evidence — the original `VerifyHash` step could not have scaled past what a 15-minute function can stream (§4.1, §4.2) | Phase 2 design |
-| A2 | D13's "upstream `docker-compose` unmodified" holds for the compose *file* but not the *binary*: AL2023 packages no compose plugin and the VPC has no internet, so the binary is mirrored and checksum-verified (D13, §3.3) | Phase 1 acceptance |
+| A2 | D13's "upstream `docker-compose` unmodified" is wrong twice over. The **binary** is mirrored and checksum-verified, because AL2023 packages no compose plugin and the VPC has no internet. The **file** is derived, not upstream's: no `nginx` (§3.5 binds the web container to loopback and reaches it over SSM), no profiled services, image references substituted to digests (§4.5), volume paths pointed at the data volume, and — unintentionally — upstream's healthchecks and `depends_on: condition: service_healthy` dropped for plain list-form `depends_on` (D13, §3.3, §3.4) | Phase 1 acceptance; corrected while closing the compose-pin question |
 | A3 | S3 Object Lock has no "event hold" primitive. Earlier drafts named one. The behaviour is assembled from a legal hold at PUT plus retention set at case close, in that order (D9, §5.2, §5.4) | Phase 2 design |
 | A4 | Dormancy gates the *pipeline* trigger, not *intake recording*. The original single "Intake EventBridge rule" row conflated two triggers with different dependencies, and disabling both would have left artifacts arriving between incidents silently unrecorded (§3.2, §5.5) | Phase 2 design |
 | A5 | Cost model replaced with measured figures. Dormant ~$15/month at 100 GB; interface endpoints, not the appliance, dominate active cost (§11) | Phase 1 acceptance |
