@@ -7,12 +7,11 @@ from irctl.cases import CaseExistsError, open_case
 
 @pytest.fixture
 def ddb():
-    return boto3.client(
-        "dynamodb",
-        region_name="us-east-1",
-        aws_access_key_id="testing",
-        aws_secret_access_key="testing",
-    )
+    # No credentials: Stubber intercepts at before-call, which runs ahead of
+    # signing, so nothing here ever needs to authenticate. Passing dummy keys
+    # would work too, but they read as hardcoded secrets to a scanner and are
+    # genuinely unnecessary.
+    return boto3.client("dynamodb", region_name="us-east-1")
 
 
 def test_open_case_writes_an_open_record(ddb):
