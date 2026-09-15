@@ -1,8 +1,7 @@
 # Incident Response Infrastructure — Design
 
-**Status:** Approved. Phase 1 built and acceptance-passed; Phase 2 built, acceptance pending;
-Phases 3–4 not started. `CLAUDE.md` tracks phase status — this line goes stale, that one does not.
-**Amended six times since approval: read §12 before trusting a remembered reading.**
+**Status:** Approved. Phases 1 and 2 built and acceptance-passed; Phases 3–4 not started. `CLAUDE.md` tracks phase status — this line goes stale, that one does not.
+**Amended eight times since approval: read §12 before trusting a remembered reading.**
 **Date:** 2026-09-14
 **Repository:** https://github.com/charlessavage90/incident-infra
 
@@ -558,10 +557,13 @@ Two implementation consequences:
 
 - **It runs outside the VPC.** In-VPC placement would put it behind the interface endpoints that
   dormancy destroys, which would couple chain-of-custody to posture through the back door.
-- **No object bytes pass through it.** It needs `HeadObject` for metadata and `CopyObject`, which
-  S3 executes server-side; it never needs `GetObject`. That is what makes running it outside the
-  VPC a defensible choice rather than a concession — a component that cannot read evidence cannot
-  leak it, wherever it runs.
+- **No object bytes pass through it, and it can never read the evidence store.** It needs
+  `HeadObject` for metadata and `CopyObject`, which S3 executes server-side. Both are authorised
+  by `s3:GetObject` on the *source* object — IAM has no `s3:HeadObject` action, and `CopyObject`
+  requires read on what it copies — so that grant exists and is scoped to **intake alone**. On
+  the evidence bucket the recorder holds write and lock, and no read at all. That asymmetry is
+  what makes running it outside the VPC a defensible choice rather than a concession: a component
+  that cannot read evidence cannot leak it, wherever it runs (amendment A7).
 
 The copy is the one part with a scale limit: it is driven by a function with a 15-minute ceiling,
 so a sufficiently large artifact will exceed it. The limit is documented and the failure is loud
@@ -709,3 +711,5 @@ earlier reading can tell what moved.
 | A4 | Dormancy gates the *pipeline* trigger, not *intake recording*. The original single "Intake EventBridge rule" row conflated two triggers with different dependencies, and disabling both would have left artifacts arriving between incidents silently unrecorded (§3.2, §5.5) | Phase 2 design |
 | A5 | Cost model replaced with measured figures. Dormant ~$15/month at 100 GB; interface endpoints, not the appliance, dominate active cost (§11) | Phase 1 acceptance |
 | A6 | Reactivation has a measured floor of roughly six minutes, set by interface endpoint ENI readiness rather than by the instance. Still "minutes" as D3 promises, but stated rather than discovered (D3, §3.2) | Phase 1 acceptance |
+| A7 | The recorder does hold `s3:GetObject`, scoped to intake. "It never needs `GetObject`" was not achievable: IAM has no `s3:HeadObject` action, so `HeadObject` is authorised by `s3:GetObject`, and `CopyObject` requires read on the source object. The recorder 403'd on `HeadObject` on its first real invocation. The load-bearing property is the asymmetry — read on intake, write-and-lock on evidence, never read on evidence — not a blanket absence (§5.5) | Phase 2 acceptance |
+| A8 | Object Lock protects a **version, not a name**. A plain `DeleteObject` on a versioned bucket writes a delete marker, and S3 permits that on an object under a legal hold — so evidence can be made invisible without being destroyed. The versions themselves are safe: deletion is refused even with `--bypass-governance-retention`, which also establishes that a legal hold outranks the bypass. `s3:DeleteObject` is now denied on both locked buckets, while `s3:DeleteObjectVersion` stays available so §5.2.2 break-glass teardown still works (§5.1, §5.2, §5.2.2) | Phase 2 acceptance |
