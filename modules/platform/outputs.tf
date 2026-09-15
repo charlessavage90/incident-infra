@@ -123,3 +123,14 @@ output "break_glass_role_arn" {
   value       = one(aws_iam_role.break_glass[*].arn)
   description = "Holds s3:BypassGovernanceRetention. Null unless break_glass_principal_arns is set."
 }
+
+# The deployment's retention policy, consumed by irctl when it opens a case.
+#
+# Terraform applies nothing with this -- the clock starts at case close, which is
+# phase 4 work. Exposing it is still the point: without it the policy would live
+# only as a default in the CLI, and a deployment configured for seven years
+# would quietly record three on every case it opened.
+output "retention_years" {
+  value       = var.retention_years
+  description = "Years an artifact is retained after its case closes (D10). Export as IR_RETENTION_YEARS."
+}

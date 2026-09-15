@@ -16,6 +16,7 @@ tofu apply
 export AWS_REGION=us-east-1
 export IR_INTAKE_BUCKET=$(tofu output -raw intake_bucket)
 export IR_CASES_TABLE=$(tofu output -raw cases_table)
+export IR_RETENTION_YEARS=$(tofu output -raw retention_years)
 EVIDENCE=$(tofu output -raw evidence_bucket)
 ARTIFACTS=$(tofu output -raw artifacts_table)
 

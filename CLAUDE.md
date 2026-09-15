@@ -38,6 +38,16 @@ bash scripts/check.sh test      # tofu test across all three modules
 The `Makefile` delegates to `scripts/check.sh`. It exists for CI and Unix; `make` is absent from
 Git Bash on Windows, so prefer invoking the script directly.
 
+**`check.sh check` is not the same locally as in CI unless `tflint` is installed.** The script
+skips linting with a one-line notice on stderr when the binary is absent, and exits 0 -- so a
+`terraform_unused_declarations` failure reaches CI looking like a clean local run. It is easy to
+lose that notice when filtering output. Install it to make local and CI agree:
+
+```bash
+curl -sSL https://github.com/terraform-linters/tflint/releases/download/v0.52.0/tflint_windows_amd64.zip -o /tmp/tflint.zip
+cd /tmp && unzip -oq tflint.zip && export PATH="/tmp:$PATH"
+```
+
 **Running one test file:**
 
 ```bash

@@ -75,3 +75,26 @@ def test_unknown_lock_mode_is_rejected_before_any_call(ddb):
     with stub, pytest.raises(ValueError, match="GOVERNANCE"):
         open_case(ddb, "ir-test-cases", "CASE-1", object_lock_mode="whatever")
     stub.assert_no_pending_responses()
+
+
+def test_retention_default_follows_the_deployment(monkeypatch):
+    """The deployment's policy, not the CLI's opinion.
+
+    A deployment configured for seven years would otherwise record three on
+    every case, and the disagreement would only surface at case close.
+    """
+    from irctl.cli import _default_retention_years
+
+    monkeypatch.setenv("IR_RETENTION_YEARS", "7")
+    assert _default_retention_years() == 7
+
+    monkeypatch.delenv("IR_RETENTION_YEARS")
+    assert _default_retention_years() == 3
+
+
+def test_unparseable_retention_years_is_refused(monkeypatch):
+    from irctl.cli import _default_retention_years
+
+    monkeypatch.setenv("IR_RETENTION_YEARS", "three")
+    with pytest.raises(SystemExit, match="whole number"):
+        _default_retention_years()

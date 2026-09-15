@@ -29,12 +29,33 @@ from botocore.exceptions import ClientError
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-EVIDENCE_BUCKET = os.environ["EVIDENCE_BUCKET"]
-CASES_TABLE = os.environ["CASES_TABLE"]
-ARTIFACTS_TABLE = os.environ["ARTIFACTS_TABLE"]
+# Clients and configuration are resolved on first use, not at import.
+#
+# Creating a boto3 client at module scope needs a resolvable region, so importing
+# this module would fail anywhere one is not configured -- which is every CI
+# runner. It passed locally only because the developer machine happened to have
+# one set, which is the worst kind of green.
+#
+# Lambda always sets AWS_REGION, so this was never a runtime problem. It was a
+# testability problem, and an import that reaches for ambient configuration is
+# one either way.
+_CLIENTS = {}
 
-s3 = boto3.client("s3")
-ddb = boto3.client("dynamodb")
+
+def _client(service):
+    if service not in _CLIENTS:
+        _CLIENTS[service] = boto3.client(service)
+    return _CLIENTS[service]
+
+
+def _config(name):
+    try:
+        return os.environ[name]
+    except KeyError:
+        raise IntakeError(
+            f"{name} is not set. The recorder is configured by modules/platform; "
+            "an unset value means the function was deployed outside it."
+        ) from None
 
 
 class IntakeError(Exception):
@@ -93,8 +114,8 @@ def _require_open_case(case_id):
     This is the quarantine boundary doing its job: past this point the object is
     under a legal hold and, in a compliance-mode deployment, permanent.
     """
-    result = ddb.get_item(
-        TableName=CASES_TABLE,
+    result = _client("dynamodb").get_item(
+        TableName=_config("CASES_TABLE"),
         Key={"case_id": {"S": case_id}},
         ConsistentRead=True,
     )
@@ -117,8 +138,8 @@ def _claim(meta, key):
     read-then-write check; only one can win a conditional write.
     """
     try:
-        ddb.put_item(
-            TableName=ARTIFACTS_TABLE,
+        _client("dynamodb").put_item(
+            TableName=_config("ARTIFACTS_TABLE"),
             Item={
                 "case_id": {"S": meta.case_id},
                 "sha256": {"S": meta.sha256},
@@ -140,8 +161,8 @@ def _claim(meta, key):
 
 
 def _existing_status(meta):
-    result = ddb.get_item(
-        TableName=ARTIFACTS_TABLE,
+    result = _client("dynamodb").get_item(
+        TableName=_config("ARTIFACTS_TABLE"),
         Key={"case_id": {"S": meta.case_id}, "sha256": {"S": meta.sha256}},
         ConsistentRead=True,
     )
@@ -159,17 +180,17 @@ def _copy_and_hold(bucket, key, meta):
     """
     target = evidence_key(meta.case_id, key)
 
-    s3.copy(
+    _client("s3").copy(
         CopySource={"Bucket": bucket, "Key": key},
-        Bucket=EVIDENCE_BUCKET,
+        Bucket=_config("EVIDENCE_BUCKET"),
         Key=target,
     )
 
     # Spec 5.2: legal hold ON, no retain-until date. The retention clock starts
     # at case close (phase 4), not here. Setting a retention period at this point
     # would silently convert the model into "N years from upload".
-    s3.put_object_legal_hold(
-        Bucket=EVIDENCE_BUCKET,
+    _client("s3").put_object_legal_hold(
+        Bucket=_config("EVIDENCE_BUCKET"),
         Key=target,
         LegalHold={"Status": "ON"},
     )
@@ -177,7 +198,7 @@ def _copy_and_hold(bucket, key, meta):
 
 
 def record_one(bucket, key):
-    head = s3.head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
+    head = _client("s3").head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
     meta = validate_metadata(key, head)
     _require_open_case(meta.case_id)
 
@@ -187,7 +208,7 @@ def record_one(bucket, key):
             # Spec 4.2: a triage package uploaded twice is recognised and not
             # reprocessed.
             log.info("duplicate %s for case %s; discarding intake copy", meta.sha256, meta.case_id)
-            s3.delete_object(Bucket=bucket, Key=key)
+            _client("s3").delete_object(Bucket=bucket, Key=key)
             return "duplicate"
         log.warning(
             "artifact %s was left mid-recording; continuing from the copy", meta.sha256
@@ -195,8 +216,8 @@ def record_one(bucket, key):
 
     target = _copy_and_hold(bucket, key, meta)
 
-    ddb.update_item(
-        TableName=ARTIFACTS_TABLE,
+    _client("dynamodb").update_item(
+        TableName=_config("ARTIFACTS_TABLE"),
         Key={"case_id": {"S": meta.case_id}, "sha256": {"S": meta.sha256}},
         UpdateExpression=(
             "SET #s = :recorded, evidence_key = :ek, custody = list_append(custody, :event)"
@@ -209,7 +230,7 @@ def record_one(bucket, key):
         },
     )
 
-    s3.delete_object(Bucket=bucket, Key=key)
+    _client("s3").delete_object(Bucket=bucket, Key=key)
     log.info("recorded %s for case %s as %s", meta.sha256, meta.case_id, target)
     return "recorded"
 

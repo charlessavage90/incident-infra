@@ -4,6 +4,7 @@ Configuration comes from the environment so the CLI has no state of its own:
 
     IR_INTAKE_BUCKET   from `tofu output -raw intake_bucket`
     IR_CASES_TABLE     from `tofu output -raw cases_table`
+    IR_RETENTION_YEARS from `tofu output -raw retention_years`  (optional, default 3)
     AWS_REGION         standard
 """
 
@@ -23,6 +24,24 @@ _ENV_SOURCE = {
     "IR_INTAKE_BUCKET": "intake_bucket",
     "IR_CASES_TABLE": "cases_table",
 }
+
+
+def _default_retention_years():
+    """The deployment's policy, not the CLI's opinion.
+
+    Falls back to D10's three years only when the deployment has not said
+    otherwise. A deployment configured for seven would otherwise record three on
+    every case, and the disagreement would surface years later at case close.
+    """
+    raw = os.environ.get("IR_RETENTION_YEARS")
+    if not raw:
+        return 3
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"IR_RETENTION_YEARS must be a whole number of years, got {raw!r}."
+        ) from None
 
 
 def _require_env(name):
@@ -78,7 +97,12 @@ def main(argv=None):
 
     case_open = case_sub.add_parser("open", help="open a new case")
     case_open.add_argument("case_id")
-    case_open.add_argument("--retention-years", type=int, default=3)
+    case_open.add_argument(
+        "--retention-years",
+        type=int,
+        default=_default_retention_years(),
+        help="Defaults to IR_RETENTION_YEARS, else 3 (D10).",
+    )
     case_open.add_argument(
         "--object-lock-mode",
         default="GOVERNANCE",
