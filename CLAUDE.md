@@ -17,8 +17,12 @@ changing anything structural:
 - `docs/superpowers/specs/2026-09-14-ir-infrastructure-design.md` — 16 numbered decisions (D1–D16),
   each with what was rejected and why
 - `docs/superpowers/plans/2026-09-14-phase-1-platform-and-appliance.md` — Phase 1 implementation
+- `docs/superpowers/plans/2026-09-14-phase-2-evidence-store.md` — Phase 2 implementation, and the
+  place three decisions the spec left open are argued: write-before-copy, the separate legal-hold
+  call, and no `prevent_destroy` on the evidence buckets
 - `docs/acceptance/phase-1.md` — the acceptance gate, plus a table of the six defects the first
   real run exposed
+- `docs/acceptance/phase-2.md` — the Phase 2 gate. **Not yet run.**
 
 Phase 1 (platform, appliance, dormancy) is complete and acceptance-passed. **Phase 2 (evidence
 store) is built and CI-green but has never been applied** — every test is offline, so "passing"
@@ -27,7 +31,8 @@ but not built.
 
 The design document carries an **§12 Amendments** table. Six corrections have been made in place
 rather than in a parallel errata file; read §12 before trusting a remembered reading of that
-document. A1, A3 and A4 changed load-bearing behaviour.
+document. A1, A3 and A4 changed load-bearing behaviour; A2 records a code defect that is still
+open and tracked in `NEXT.md`.
 
 ## Commands
 
@@ -398,8 +403,9 @@ Development does not need a dedicated IR account; nothing in phases 1–4 requir
   action in this design — locked objects cannot be deleted before expiry by anyone including root,
   and the bucket cannot be destroyed while they exist, so `tofu destroy` fails against one. Phase 1
   creates no Object Lock buckets, so the risk arrives with Phase 2. Spec §5.2.1 specifies an
-  `acknowledge_compliance_mode_is_irreversible` guard variable; **it is not implemented yet** and
-  must be built with those buckets.
+  `acknowledge_compliance_mode_is_irreversible` guard variable. **It is implemented** — declared
+  in `variables.tf` and enforced by a `lifecycle { precondition }` on *both* Object Lock buckets
+  in `evidence.tf`, with `expect_failures` coverage in `tests/evidence.tftest.hcl`.
 - Governance mode is destroyable only by a principal holding `s3:BypassGovernanceRetention`, which
   the development role will need from Phase 2 onwards or teardown fails.
 - Set `budget_alert_emails` before the first apply. The auto-dormancy nudge is Phase 4, so until
@@ -451,15 +457,19 @@ Every one of these cost real time.
 Run `snyk_iac_scan` on `modules/platform` and `snyk_code_scan` on `cli` and
 `modules/platform/lambda` after touching either.
 
-**Current state: 13 low IaC findings, 0 code findings.** Nothing above low severity. All 13 are
-accepted and **left visible rather than suppressed**, with per-finding reasoning in the headers of
-`evidence.tf`, `audit.tf` and `storage.tf`. Three of them are not weaknesses the scanner can see
-through:
+**Nothing above low severity, and 0 Snyk Code findings.** The low count moves whenever a resource
+is added — it was 13, then 14 when the Lambda arrived, then 13 again once X-Ray tracing was
+enabled — so **re-run the scan rather than trusting a number written here or in a commit
+message.** The lows are accepted and **left visible rather than suppressed**, with reasoning
+grouped by rule in the headers of `evidence.tf`, `audit.tf` and `storage.tf`. Three are not
+weaknesses the scanner can see through:
 
 - **`SNYK-CC-TF-45` (no server access logging) on `evidence` and `plaso`** — S3 *cannot* deliver
   server access logs to an Object Lock bucket at all. That impossibility is why spec §5.1 specifies
-  CloudTrail data events, which are built and cover all four buckets plus `tooling`. The rule looks
-  for `aws_s3_bucket_logging`, so it reports whether or not the control exists.
+  CloudTrail data events, which are built. The selector in `audit.tf` is the authority on what it
+  covers — deliberately not the `audit` bucket itself, since a trail whose data events include its
+  own destination writes events about writing events. The rule looks for `aws_s3_bucket_logging`,
+  so it reports whether or not the control exists.
 - **`SNYK-CC-TF-127` (no MFA delete)** — cannot be set by Terraform under any provider version; it
   needs root credentials presenting an MFA token via the CLI. On the locked buckets it is also the
   weaker control: a legal hold cannot be cleared by presenting a TOTP code.

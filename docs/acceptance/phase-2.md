@@ -141,11 +141,7 @@ bypass does not clear one. Set `--legal-hold Status=OFF` on it first.
 
 ## Known gaps at this phase
 
-- **No `irctl case close`.** Phase 4 per §9. Checks 15 and 16 probe its primitives by hand
-  so that phase does not meet them cold.
-- **The copy has a documented size ceiling** — the recorder drives it under a 900-second
-  timeout. It fails loudly and the object stays in intake. Phase 3 moves the copy into Batch.
-- **A sub-second window exists between the copy and the legal hold.** Deliberate; the
-  reasoning is in `_copy_and_hold`.
-- **`SNYK-CC-TF-45` still reports** on all four buckets. CloudTrail data events are the
-  compensating control and are real, but the rule looks for `aws_s3_bucket_logging`.
+Listed in `NEXT.md` under "Deliberately not built, so nobody goes looking" rather than repeated
+here. The short version, so a reader running these checks is not surprised by them: there is no
+`irctl case close` yet, the recorder's copy has a 900-second ceiling, and there is a sub-second
+window between the copy and the legal hold. None of them should make a check below fail.

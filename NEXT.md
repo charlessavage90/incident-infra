@@ -33,11 +33,11 @@ not terminated.
 buckets, two DynamoDB tables, a Lambda and a CloudTrail trail — all cheap, and none of them
 affected by posture.
 
-**The one thing that apply *modifies* rather than creates is the CMK.** Phase 2 replaces its
-default key policy with an explicit one, because CloudTrail is a service principal the default
-policy cannot reach. The `EnableRootAccountAccess` statement is what keeps every existing IAM-based
-grant working — the appliance role's KMS access delegates through it. If the appliance fails to
-start after a Phase 2 apply, that key policy is the first thing to look at, not cloud-init.
+**The one thing that apply *modifies* rather than creates is the CMK** — Phase 2 gives it an
+explicit key policy (the why is in `CLAUDE.md`'s invariants). The operational consequence, which
+is what belongs here: **if the appliance fails to start after a Phase 2 apply, look at the key
+policy before cloud-init.** The appliance role's KMS access delegates through that policy's root
+statement.
 
 To wake it: `cd envs/example/analysis && tofu apply -var='posture=active' -var='responders=["alice"]'`.
 Expect **roughly six minutes** before SSM is reachable — see the known limitation below.
@@ -56,8 +56,8 @@ either before or after item 2 — acceptance defects would land as follow-up com
 branch either way.
 
 **2. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
-item that matters: the module has 46 platform tests and 19 Python tests, and **not one of them
-has spoken to AWS.** Phase 1's equivalent run surfaced six defects against a codebase that also
+item that matters: **not one test in this repository has ever spoken to AWS** — see `CLAUDE.md`'s
+Commands section for the suites and their counts, which belong there rather than here. Phase 1's equivalent run surfaced six defects against a codebase that also
 looked finished.
 
 Costs a few cents and does not need the appliance — leave the environment dormant. Requires
@@ -94,19 +94,17 @@ environment — hence the owner's call on when, not whether.
 
 ## Known limitations, not defects
 
-**Reactivation takes about six minutes, not seconds.** Dormancy destroys the interface endpoints,
-and a recreated endpoint reports `available` via the API well before its ENI actually forwards
-packets. The SSM agent starts inside that window, fails, and would hibernate for up to an hour;
-`ssm-endpoint-wait.service` catches that and restarts it once the endpoint responds.
+**The reactivation floor** (roughly six minutes, set by interface endpoint ENI readiness) is
+described in full in spec §3.2 and recorded as amendment A6. Not restated here — it is a measured
+fact, not an open item.
 
-Two ways to do better, if it ever matters:
+The open *decision* it leaves behind: keeping only the three SSM endpoints alive through dormancy
+would remove the race entirely, at roughly $22/month of dormant cost. **That trade has not been
+taken and nobody has argued for it.** Six minutes is inside D3's promise, so this is a
+cost-versus-convenience call rather than a defect.
 
-- Keep only the three SSM endpoints alive during dormancy and destroy the other five. Removes the
-  race entirely, at roughly $22/month of dormant cost.
-- Accept it. Six minutes is well inside the design's promise.
-
-This was verified across three full dormancy cycles; the sketch and user survived every one, and
-the `mkfs` guard never fired.
+Verified across three full dormancy cycles during Phase 1 acceptance; the sketch and user survived
+every one, and the `mkfs` guard never fired.
 
 ---
 

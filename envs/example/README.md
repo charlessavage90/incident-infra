@@ -81,5 +81,12 @@ was left running.
 
 ## Before touching a real incident
 
-Run `docs/acceptance/phase-1.md` end to end. Infrastructure only touched during incidents is
+Run **both** acceptance gates end to end. Infrastructure only touched during incidents is
 infrastructure that is broken during incidents.
+
+- `docs/acceptance/phase-1.md` — platform, appliance, dormancy cycle. Passed once already.
+- `docs/acceptance/phase-2.md` — the evidence store. **Never run.** Phase 2 adds four buckets, two
+  DynamoDB tables, a Lambda and a CloudTrail trail to this deployment, and gives the existing CMK
+  an explicit key policy. Cheap, and it does not need the appliance running.
+
+`../../NEXT.md` is the current state of both.

@@ -1,6 +1,8 @@
 # Incident Response Infrastructure — Design
 
-**Status:** Approved design, pending implementation plan
+**Status:** Approved. Phase 1 built and acceptance-passed; Phase 2 built, acceptance pending;
+Phases 3–4 not started. `CLAUDE.md` tracks phase status — this line goes stale, that one does not.
+**Amended six times since approval: read §12 before trusting a remembered reading.**
 **Date:** 2026-09-14
 **Repository:** https://github.com/charlessavage90/incident-infra
 
@@ -153,7 +155,8 @@ application segment.
 Private subnets across two availability zones. **No internet gateway and no NAT gateway by
 default.** Egress is via VPC endpoints: S3 as a free gateway endpoint, plus interface endpoints
 for SSM, SSM Messages, EC2 Messages, ECR (api and dkr), CloudWatch Logs, Secrets Manager, KMS,
-and Step Functions.
+and Step Functions. **Eight of those nine are built**; the Step Functions endpoint arrives with
+the Step Functions state machine in phase 3, so a Phase 1 or 2 deployment has eight.
 
 This is a posture decision, not frugality. plaso workers handle live malware. An environment
 with no route to the internet cannot be used to exfiltrate evidence or call home.

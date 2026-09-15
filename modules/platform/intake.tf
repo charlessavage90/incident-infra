@@ -84,6 +84,13 @@ resource "aws_iam_role_policy" "intake" {
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
         Resource = aws_kms_key.main.arn
       },
+      {
+        # X-Ray segment upload cannot be resource-scoped.
+        Sid      = "XRayTracing"
+        Effect   = "Allow"
+        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+        Resource = "*"
+      },
     ]
   })
 }
@@ -101,6 +108,14 @@ resource "aws_lambda_function" "intake" {
   # documented Phase 2 ceiling; phase 3 moves the copy into Batch.
   timeout     = 900
   memory_size = 256
+
+  # The server-side copy is the least observable thing here -- it is one boto3
+  # call that fans out into UploadPartCopy above 5 GB, across two buckets with
+  # different encryption contexts. When it fails, the CloudWatch log line alone
+  # does not say which leg failed. Tracing costs pennies at this invocation rate.
+  tracing_config {
+    mode = "Active"
+  }
 
   environment {
     variables = {
