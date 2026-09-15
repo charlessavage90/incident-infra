@@ -3,17 +3,18 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-14, at the start of Phase 2.
+**Last updated:** 2026-09-14, Phase 2 built and awaiting its acceptance run.
 
 ---
 
 ## State right now
 
-Phase 1 is built and acceptance-passed against a real AWS account. **Phase 2 is in progress.**
-Phases 3–4 are specified in the design but not started.
+Phase 1 is built and acceptance-passed against a real AWS account. **Phase 2 is built and
+CI-green, but has never been applied** — every test is offline. Phases 3–4 are specified in the
+design but not started.
 
-PRs #1 (design + plan), #2 (Phase 1 implementation) and #3 (six acceptance defects) are all
-merged. Phase 2 work is on `feat/phase-2-evidence-store`.
+PRs #1 (design + plan), #2 (Phase 1 implementation) and #3 (six acceptance defects) are merged.
+Phase 2 is PR #4 on `feat/phase-2-evidence-store`.
 
 **The live development environment is DORMANT.** It costs roughly $15/month in that state and
 nothing needs doing to it. What persists:
@@ -38,7 +39,24 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**1. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
+**1. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
+item that matters: the module has 46 platform tests and 19 Python tests, and **not one of them
+has spoken to AWS.** Phase 1's equivalent run surfaced six defects against a codebase that also
+looked finished.
+
+Costs a few cents and does not need the appliance — leave the environment dormant. Requires
+`tofu init` first, because the `archive` provider is new in this phase.
+
+The checks most likely to fail, and worth reading the reasoning for before running:
+
+- **6 and 7 together.** The object must be under a legal hold *and* have no retain-until date.
+  Either alone passes a weaker reading of §5.2 while getting the retention model wrong.
+- **12.** S3 must reject a mismatched `x-amz-checksum-sha256` at PUT. The whole of A1 rests on
+  this actually happening rather than being assumed.
+- **15 and 16.** These exercise primitives Phase 2 does not build, so that Phase 4's case close
+  does not meet them cold. 16 also proves teardown is possible at all.
+
+**2. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
 compose pin; not fixed, because it is in `analysis/` and Phase 2 was scoped to touch nothing there.
 
 At the pinned `20260630` tag, upstream gives `opensearch`, `postgres` and `redis` healthchecks and
@@ -76,10 +94,11 @@ the `mkfs` guard never fired.
 
 ---
 
-## Phase 2 — evidence store (in progress)
+## Phase 2 — evidence store (built, not yet accepted)
 
-Spec §9. Delivers S3 buckets, Object Lock, hashing, the case manifest, and manual ingest. Done
-when an artifact can be ingested by hand and is hashed, immutable, and recorded.
+Spec §9. Four buckets, two manifest tables, the intake recorder, `irctl`, the compliance-mode
+guard and CloudTrail data events are all implemented on PR #4. What remains is the acceptance
+run above.
 
 **Settled during Phase 2 design** (all now in the spec, see §12):
 
@@ -93,29 +112,40 @@ when an artifact can be ingested by hand and is hashed, immutable, and recorded.
 - **Manual means the upload is manual.** Verify, manifest, copy and hold are automatic from the
   moment the object lands; Phase 3 wraps that recorder in Step Functions rather than replacing it.
 
-Carry these forward:
+**Found while building it, worth not rediscovering:**
 
-- **The S3 endpoint policy lesson applies directly.** Evidence buckets will be reached by more than
-  the instance role. Any access path that is anonymous or presigned by AWS does **not** carry
-  `aws:PrincipalAccount`, and the existing condition will deny it with a 403 that names nothing
-  useful. This already broke `dnf` and would have broken `docker pull`.
-- **Implement `acknowledge_compliance_mode_is_irreversible`** (spec §5.2.1). It is specified and
-  not built. Compliance mode is the only irreversible action in the system, and Phase 2 is where it
-  first becomes reachable.
+- **`scripts/sync-test-mocks.py` regenerates the `mock_provider` preamble** in every platform
+  test file from one canonical block. Adding the Lambda broke seven runs in files I had not
+  touched, because only the new test file mocked `aws_iam_role` and the provider validates role
+  ARNs. The error names the ARN, never the missing mock. Edit the script, not one file.
+- **`mock_resource` defaults apply to every instance of a type**, so all four buckets share one
+  ARN under test. Any assertion of the form "this policy does not mention the evidence bucket"
+  passes vacuously. Assert on actions, which are literal config.
+- **`expect_failures` must list every resource that trips a shared precondition.** Both evidence
+  buckets carry the compliance guard; listing one passed while leaving the other reachable.
+
+**Still true and carried forward:**
+
+- **The S3 endpoint policy lesson applies to Phase 3, not Phase 2.** Nothing built in Phase 2 reaches
+  the evidence buckets through the VPC endpoint — `irctl` runs on a responder's machine and the
+  recorder runs outside the VPC. The Batch workers of Phase 3 are the first thing that will, and any
+  access path that is anonymous or presigned by AWS does **not** carry `aws:PrincipalAccount`. The
+  existing condition denies it with a 403 that names nothing useful. This already broke `dnf` and
+  would have broken `docker pull`.
 - **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` will fail against
   any bucket holding locked objects. `AdministratorAccess` covers it, but a scoped role would not.
+  The teardown procedure is written out at the end of `docs/acceptance/phase-2.md`, including the
+  part that is not obvious: a **legal hold is not cleared by the retention bypass** and must be
+  turned off separately.
 - **Retention is a legal hold at PUT, then `PutObjectRetention` at case close — in that order.**
   The clock starts at closure, not at upload. Object Lock has no "event hold" primitive; earlier
-  drafts said it did (A3). Default three years (D10).
-- **Object Lock buckets cannot receive S3 server access logs** — use CloudTrail data events, and
-  point them at the tooling bucket too. That gives `SNYK-CC-TF-45` a real compensating control
-  without a second log-target bucket, but the rule looks for `aws_s3_bucket_logging`, so the
-  finding stays visible either way. Decide then whether a scoped ignore is now defensible.
-- Hashing happens **client-side before upload**, and S3 verifies it **at PUT** via
-  `x-amz-checksum-sha256` rather than in a pipeline step (A1). Nothing re-hashes evidence — a
-  15-minute function cannot stream a 20 GB triage package. Multipart stores a composite
-  `<hash>-N`, so the whole-file digest also goes in object metadata and the manifest, which is
-  what deduplication keys on (spec §4.2).
+  drafts said it did (A3). Default three years (D10). Phase 4 builds `irctl case close`; acceptance
+  checks 15 and 16 prove the primitives first.
+- **`SNYK-CC-TF-45` and `SNYK-CC-TF-127` now report on four buckets rather than one.** CloudTrail
+  data events are the real compensating control and are built; the rule looks for
+  `aws_s3_bucket_logging`, so it reports regardless, and MFA delete cannot be set from Terraform at
+  all. Full reasoning is in the headers of `evidence.tf` and `audit.tf`. Whether a scoped ignore is
+  now defensible is still open — it is a judgement call, not a defect.
 
 ---
 

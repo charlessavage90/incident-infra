@@ -81,7 +81,7 @@ Spec §5.1, §5.2, §5.2.1. Delivers the `evidence` and `plaso` buckets with Obj
 - Consumes: `aws_kms_key.main`, `local.common_tags`, `data.aws_caller_identity.current`, `var.name_prefix` — all already exist
 - Produces: `aws_s3_bucket.evidence`, `aws_s3_bucket.plaso`, `var.object_lock_mode`, `var.retention_years`, `var.acknowledge_compliance_mode_is_irreversible`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `modules/platform/tests/evidence.tftest.hcl`:
 
@@ -237,7 +237,7 @@ run "object_lock_mode_rejects_an_unknown_value" {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
@@ -245,7 +245,7 @@ cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
 
 Expected: FAIL — `A managed resource "aws_s3_bucket" "evidence" has not been declared`. Confirm the run count is non-zero; `0 passed, 0 failed` means the filter matched nothing and you have proved nothing.
 
-- [ ] **Step 3: Add the Phase 2 variables**
+- [x] **Step 3: Add the Phase 2 variables**
 
 Append to `modules/platform/variables.tf`:
 
@@ -325,7 +325,7 @@ variable "break_glass_principal_arns" {
 }
 ```
 
-- [ ] **Step 4: Write the evidence buckets**
+- [x] **Step 4: Write the evidence buckets**
 
 Create `modules/platform/evidence.tf`:
 
@@ -457,7 +457,7 @@ resource "aws_s3_bucket_public_access_block" "plaso" {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
@@ -465,7 +465,7 @@ cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
 
 Expected: PASS, 6 run blocks.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add modules/platform/evidence.tf modules/platform/variables.tf modules/platform/tests/evidence.tftest.hcl
@@ -486,7 +486,7 @@ Spec §5.1. The quarantine boundary. S3 verifies transfer integrity at PUT (A1),
 - Consumes: `var.intake_expiry_days`, `aws_kms_key.main`
 - Produces: `aws_s3_bucket.intake`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `modules/platform/tests/evidence.tftest.hcl`:
 
@@ -528,7 +528,7 @@ run "intake_bucket_refuses_plaintext_transport" {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
@@ -536,7 +536,7 @@ cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
 
 Expected: FAIL — `aws_s3_bucket.intake` not declared.
 
-- [ ] **Step 3: Write the intake bucket**
+- [x] **Step 3: Write the intake bucket**
 
 Append to `modules/platform/evidence.tf`:
 
@@ -627,7 +627,7 @@ resource "aws_s3_bucket_policy" "intake" {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
@@ -635,7 +635,7 @@ cd modules/platform && tofu test -filter='tests\evidence.tftest.hcl'
 
 Expected: PASS, 9 run blocks.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add modules/platform/evidence.tf modules/platform/tests/evidence.tftest.hcl
@@ -656,7 +656,7 @@ Spec §5.3. Two DynamoDB tables. The `artifacts` composite key is what makes ded
 - Consumes: `aws_kms_key.main`, `var.manifest_deletion_protection`
 - Produces: `aws_dynamodb_table.cases` (hash key `case_id`), `aws_dynamodb_table.artifacts` (hash key `case_id`, range key `sha256`)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `modules/platform/tests/manifest.tftest.hcl` — start with the identical `mock_provider` block from Task 1 Step 1 (copy it verbatim, including the comment; OpenTofu 1.12 has no shared-mock mechanism), then:
 
@@ -753,7 +753,7 @@ run "deletion_protection_can_be_released_for_teardown" {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\manifest.tftest.hcl'
@@ -761,7 +761,7 @@ cd modules/platform && tofu test -filter='tests\manifest.tftest.hcl'
 
 Expected: FAIL — `aws_dynamodb_table.artifacts` not declared.
 
-- [ ] **Step 3: Write the tables**
+- [x] **Step 3: Write the tables**
 
 Create `modules/platform/manifest.tf`:
 
@@ -842,7 +842,7 @@ resource "aws_dynamodb_table" "artifacts" {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\manifest.tftest.hcl'
@@ -850,7 +850,7 @@ cd modules/platform && tofu test -filter='tests\manifest.tftest.hcl'
 
 Expected: PASS, 6 run blocks.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add modules/platform/manifest.tf modules/platform/tests/manifest.tftest.hcl
@@ -872,7 +872,7 @@ Spec §5.1. Object Lock buckets cannot receive S3 server access logs, so bucket-
 - Consumes: `aws_s3_bucket.intake/evidence/plaso`, `aws_s3_bucket.tooling`, `data.aws_region.current.region`
 - Produces: `aws_s3_bucket.audit`, `aws_cloudtrail.data_events`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `modules/platform/tests/audit.tftest.hcl` — identical `mock_provider` block from Task 1 Step 1, then:
 
@@ -946,7 +946,7 @@ run "key_policy_lets_cloudtrail_encrypt_and_keeps_root" {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\audit.tftest.hcl'
@@ -954,7 +954,7 @@ cd modules/platform && tofu test -filter='tests\audit.tftest.hcl'
 
 Expected: FAIL — `aws_cloudtrail.data_events` not declared.
 
-- [ ] **Step 3: Give the CMK an explicit key policy**
+- [x] **Step 3: Give the CMK an explicit key policy**
 
 Replace the `aws_kms_key` resource in `modules/platform/kms.tf` with:
 
@@ -1003,7 +1003,7 @@ resource "aws_kms_key" "main" {
 }
 ```
 
-- [ ] **Step 4: Write the audit bucket and trail**
+- [x] **Step 4: Write the audit bucket and trail**
 
 Create `modules/platform/audit.tf`:
 
@@ -1148,7 +1148,7 @@ resource "aws_cloudtrail" "data_events" {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\audit.tftest.hcl'
@@ -1156,7 +1156,7 @@ cd modules/platform && tofu test -filter='tests\audit.tftest.hcl'
 
 Expected: PASS, 4 run blocks.
 
-- [ ] **Step 6: Run the full module test suite**
+- [x] **Step 6: Run the full module test suite**
 
 The key policy change touches a resource every other test file references.
 
@@ -1166,7 +1166,7 @@ cd modules/platform && tofu test
 
 Expected: PASS. If `tests/foundations.tftest.hcl` or `tests/iam.tftest.hcl` now fail, the key policy is the cause — fix the policy, not the test.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add modules/platform/audit.tf modules/platform/kms.tf modules/platform/tests/audit.tftest.hcl
@@ -1187,7 +1187,7 @@ Spec §5.2, §5.2.2. The break-glass role is what makes GOVERNANCE mode meaningf
 - Consumes: `var.break_glass_principal_arns`, `aws_s3_bucket.evidence/plaso/intake`, `aws_dynamodb_table.cases/artifacts`
 - Produces: `aws_iam_role.break_glass` (count-gated), `aws_iam_policy.responder`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `modules/platform/tests/intake.tftest.hcl` — identical `mock_provider` block from Task 1 Step 1, plus this extra mock inside the `mock_provider "aws"` block:
 
@@ -1263,7 +1263,7 @@ run "responder_policy_can_upload_but_not_reach_evidence" {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\intake.tftest.hcl'
@@ -1271,7 +1271,7 @@ cd modules/platform && tofu test -filter='tests\intake.tftest.hcl'
 
 Expected: FAIL — `aws_iam_role.break_glass` not declared.
 
-- [ ] **Step 3: Write the roles**
+- [x] **Step 3: Write the roles**
 
 Append to `modules/platform/iam.tf`:
 
@@ -1400,7 +1400,7 @@ resource "aws_iam_policy" "responder" {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\intake.tftest.hcl'
@@ -1408,7 +1408,7 @@ cd modules/platform && tofu test -filter='tests\intake.tftest.hcl'
 
 Expected: PASS, 3 run blocks.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add modules/platform/iam.tf modules/platform/tests/intake.tftest.hcl
@@ -1439,7 +1439,7 @@ The manifest row is written *before* the copy. Writing it after would mean a fai
 | `status="recording"` | A previous attempt died mid-flight | Continue from the copy. `CopyObject` and `PutObjectLegalHold` are both idempotent |
 | `status="recorded"` | Genuine duplicate (spec §4.2) | Delete from intake, do nothing else |
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `modules/platform/lambda/intake/test_handler.py`:
 
@@ -1497,7 +1497,7 @@ def test_evidence_key_is_prefixed_by_case():
     assert handler.evidence_key("CASE-1", "triage.zip") == "CASE-1/triage.zip"
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform/lambda/intake && python -m pytest test_handler.py -v
@@ -1505,7 +1505,7 @@ cd modules/platform/lambda/intake && python -m pytest test_handler.py -v
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'handler'`.
 
-- [ ] **Step 3: Write the handler**
+- [x] **Step 3: Write the handler**
 
 Create `modules/platform/lambda/intake/handler.py`:
 
@@ -1751,7 +1751,7 @@ def handler(event, context):
     return {"recorded": outcomes}
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd modules/platform/lambda/intake && python -m pytest test_handler.py -v
@@ -1759,7 +1759,7 @@ cd modules/platform/lambda/intake && python -m pytest test_handler.py -v
 
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add modules/platform/lambda/intake/
@@ -1779,7 +1779,7 @@ git commit -m "feat(platform): intake recorder, outside the VPC and blind to obj
 - Consumes: `aws_s3_bucket.intake/evidence`, `aws_dynamodb_table.cases/artifacts`, `modules/platform/lambda/intake/handler.py`
 - Produces: `aws_lambda_function.intake`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `modules/platform/tests/intake.tftest.hcl`:
 
@@ -1837,7 +1837,7 @@ run "recorder_has_the_full_timeout" {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd modules/platform && tofu test -filter='tests\intake.tftest.hcl'
@@ -1845,7 +1845,7 @@ cd modules/platform && tofu test -filter='tests\intake.tftest.hcl'
 
 Expected: FAIL — `aws_lambda_function.intake` not declared.
 
-- [ ] **Step 3: Add the archive provider**
+- [x] **Step 3: Add the archive provider**
 
 Modify `modules/platform/versions.tf`, adding to `required_providers`:
 
@@ -1856,7 +1856,7 @@ Modify `modules/platform/versions.tf`, adding to `required_providers`:
     }
 ```
 
-- [ ] **Step 4: Write the infrastructure**
+- [x] **Step 4: Write the infrastructure**
 
 Create `modules/platform/intake.tf`:
 
@@ -2003,7 +2003,7 @@ resource "aws_cloudwatch_log_group" "intake" {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 ```bash
 cd modules/platform && tofu init -backend=false && tofu test -filter='tests\intake.tftest.hcl'
@@ -2011,7 +2011,7 @@ cd modules/platform && tofu init -backend=false && tofu test -filter='tests\inta
 
 The `init` is needed once: `archive` is a new provider. Expected: PASS, 7 run blocks.
 
-- [ ] **Step 6: Commit the lock file too**
+- [x] **Step 6: Commit the lock file too**
 
 ```bash
 git add modules/platform/intake.tf modules/platform/versions.tf modules/platform/.terraform.lock.hcl modules/platform/tests/intake.tftest.hcl
@@ -2029,7 +2029,7 @@ git commit -m "feat(platform): wire the intake recorder to bucket arrivals"
 **Interfaces:**
 - Produces: `evidence_bucket`, `intake_bucket`, `plaso_bucket`, `audit_bucket`, `cases_table`, `artifacts_table`, `responder_policy_arn`, `break_glass_role_arn` — `irctl` and the acceptance gate read these
 
-- [ ] **Step 1: Append the outputs**
+- [x] **Step 1: Append the outputs**
 
 Append to `modules/platform/outputs.tf`:
 
@@ -2079,7 +2079,7 @@ output "break_glass_role_arn" {
 }
 ```
 
-- [ ] **Step 2: Wire the example environment**
+- [x] **Step 2: Wire the example environment**
 
 In `envs/example/platform/main.tf`, add inside the `module "platform"` block, after `data_volume_gb`:
 
@@ -2095,7 +2095,7 @@ In `envs/example/platform/main.tf`, add inside the `module "platform"` block, af
   manifest_deletion_protection = false
 ```
 
-- [ ] **Step 3: Verify the whole suite still passes**
+- [x] **Step 3: Verify the whole suite still passes**
 
 ```bash
 bash scripts/check.sh check
@@ -2103,7 +2103,7 @@ bash scripts/check.sh check
 
 Expected: fmt clean, all three modules valid, tflint clean, and **52 + 20 = 72 run blocks** passing (platform now 39). Check the count.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add modules/platform/outputs.tf envs/example/platform/main.tf
@@ -2123,7 +2123,7 @@ Spec §4.2. One pass over the file producing the whole-file digest, the per-part
 **Interfaces:**
 - Produces: `PART_SIZE`, `FileDigest(sha256_hex, sha256_b64, part_digests_b64, size_bytes)`, `hash_file(path, part_size=PART_SIZE) -> FileDigest`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `cli/tests/test_digest.py`:
 
@@ -2197,7 +2197,7 @@ def test_default_part_size_matches_s3_multipart_minimum():
     assert PART_SIZE >= 5 * 1024 * 1024
 ```
 
-- [ ] **Step 2: Create the package scaffolding**
+- [x] **Step 2: Create the package scaffolding**
 
 Create `cli/pyproject.toml`:
 
@@ -2234,7 +2234,7 @@ Create `cli/irctl/__init__.py`:
 __version__ = "0.2.0"
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 ```bash
 cd cli && python -m pip install -e ".[dev]" && python -m pytest tests/test_digest.py -v
@@ -2242,7 +2242,7 @@ cd cli && python -m pip install -e ".[dev]" && python -m pytest tests/test_diges
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'irctl.digest'`.
 
-- [ ] **Step 4: Write the digest module**
+- [x] **Step 4: Write the digest module**
 
 Create `cli/irctl/digest.py`:
 
@@ -2312,7 +2312,7 @@ def hash_file(path, part_size=PART_SIZE):
     )
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 ```bash
 cd cli && python -m pytest tests/test_digest.py -v
@@ -2320,7 +2320,7 @@ cd cli && python -m pytest tests/test_digest.py -v
 
 Expected: PASS, 6 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add cli/pyproject.toml cli/irctl/__init__.py cli/irctl/digest.py cli/tests/test_digest.py
@@ -2339,7 +2339,7 @@ git commit -m "feat(irctl): one-pass whole-file and per-part SHA-256"
 - Consumes: nothing from earlier tasks
 - Produces: `open_case(ddb, table, case_id, retention_years=3, object_lock_mode="GOVERNANCE", cost_tag=None) -> dict`, `CaseExistsError`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `cli/tests/test_cases.py`:
 
@@ -2411,7 +2411,7 @@ def test_unknown_lock_mode_is_rejected_before_any_call(ddb):
     stub.assert_no_pending_responses()
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd cli && python -m pytest tests/test_cases.py -v
@@ -2419,7 +2419,7 @@ cd cli && python -m pytest tests/test_cases.py -v
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'irctl.cases'`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 Create `cli/irctl/cases.py`:
 
@@ -2501,7 +2501,7 @@ def open_case(
     return record
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd cli && python -m pytest tests/test_cases.py -v
@@ -2509,7 +2509,7 @@ cd cli && python -m pytest tests/test_cases.py -v
 
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add cli/irctl/cases.py cli/tests/test_cases.py
@@ -2530,7 +2530,7 @@ Spec §4.2. The checksum goes on the PUT so S3 rejects a corrupt transfer rather
 - Consumes: `irctl.digest.hash_file`, `irctl.digest.FileDigest`, `irctl.cases.open_case`
 - Produces: `upload_artifact(s3, bucket, case_id, path, source=None, part_size=PART_SIZE) -> dict`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `cli/tests/test_upload.py`:
 
@@ -2653,7 +2653,7 @@ def test_failed_multipart_is_aborted(s3, tmp_path):
     stub.assert_no_pending_responses()
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd cli && python -m pytest tests/test_upload.py -v
@@ -2661,7 +2661,7 @@ cd cli && python -m pytest tests/test_upload.py -v
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'irctl.upload'`.
 
-- [ ] **Step 3: Write the upload module**
+- [x] **Step 3: Write the upload module**
 
 Create `cli/irctl/upload.py`:
 
@@ -2766,7 +2766,7 @@ def upload_artifact(s3, bucket, case_id, path, source=None, part_size=PART_SIZE)
     }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd cli && python -m pytest tests/test_upload.py -v
@@ -2774,7 +2774,7 @@ cd cli && python -m pytest tests/test_upload.py -v
 
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Write the CLI entry point**
+- [x] **Step 5: Write the CLI entry point**
 
 Create `cli/irctl/cli.py`:
 
@@ -2875,7 +2875,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 6: Verify the CLI wires up**
+- [x] **Step 6: Verify the CLI wires up**
 
 ```bash
 cd cli && python -m irctl.cli --help && python -m irctl.cli upload --help
@@ -2883,7 +2883,7 @@ cd cli && python -m irctl.cli --help && python -m irctl.cli upload --help
 
 Expected: both print usage without traceback.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add cli/irctl/upload.py cli/irctl/cli.py cli/tests/test_upload.py
@@ -2897,7 +2897,7 @@ git commit -m "feat(irctl): checksummed upload and the command line"
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Add the job**
+- [x] **Step 1: Add the job**
 
 Append to `.github/workflows/ci.yml`, at the same indentation as the existing `check:` job:
 
@@ -2928,7 +2928,7 @@ Append to `.github/workflows/ci.yml`, at the same indentation as the existing `c
           python -m pytest test_handler.py -v
 ```
 
-- [ ] **Step 2: Verify both suites pass locally exactly as CI runs them**
+- [x] **Step 2: Verify both suites pass locally exactly as CI runs them**
 
 ```bash
 cd cli && python -m pytest tests -v
@@ -2937,7 +2937,7 @@ cd ../modules/platform/lambda/intake && python -m pytest test_handler.py -v
 
 Expected: 14 tests and 5 tests, all passing.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
@@ -2953,7 +2953,7 @@ Spec §9: Phase 2 is done when an artifact can be ingested by hand and is hashed
 **Files:**
 - Create: `docs/acceptance/phase-2.md`
 
-- [ ] **Step 1: Write the acceptance document**
+- [x] **Step 1: Write the acceptance document**
 
 Create `docs/acceptance/phase-2.md`:
 
@@ -3076,7 +3076,7 @@ tofu destroy
 | | *(fill in during the run — this table is the point of the exercise)* | |
 ````
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/acceptance/phase-2.md
