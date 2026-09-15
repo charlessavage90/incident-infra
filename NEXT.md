@@ -3,18 +3,19 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-14, at the end of Phase 1 acceptance.
+**Last updated:** 2026-09-14, Phase 2 built and awaiting its acceptance run.
 
 ---
 
 ## State right now
 
-Phase 1 is built and acceptance-passed against a real AWS account. Phases 2–4 are specified in the
+Phase 1 is built and acceptance-passed against a real AWS account. **Phase 2 is built and
+CI-green, but has never been applied** — every test is offline. Phases 3–4 are specified in the
 design but not started.
 
-**Open PR: #3** — "Fix six defects found by Phase 1 acceptance against real AWS". CI green.
-Contains the six acceptance fixes plus `CLAUDE.md`/`NEXT.md`. PRs #1 (design + plan) and #2
-(Phase 1 implementation) are merged.
+PRs #1 (design + plan), #2 (Phase 1 implementation) and #3 (six acceptance defects) are merged.
+**Phase 2 is PR #4 on `feat/phase-2-evidence-store`, still a draft, CI green on all four checks.**
+Nothing is waiting on the previous session; the branch is pushed and the working tree is clean.
 
 **The live development environment is DORMANT.** It costs roughly $15/month in that state and
 nothing needs doing to it. What persists:
@@ -28,6 +29,16 @@ nothing needs doing to it. What persists:
 What is destroyed while dormant: the eight VPC interface endpoints. The appliance is *stopped*,
 not terminated.
 
+**None of Phase 2 exists in that account yet.** The first `tofu apply` from PR #4 creates four
+buckets, two DynamoDB tables, a Lambda and a CloudTrail trail — all cheap, and none of them
+affected by posture.
+
+**The one thing that apply *modifies* rather than creates is the CMK** — Phase 2 gives it an
+explicit key policy (the why is in `CLAUDE.md`'s invariants). The operational consequence, which
+is what belongs here: **if the appliance fails to start after a Phase 2 apply, look at the key
+policy before cloud-init.** The appliance role's KMS access delegates through that policy's root
+statement.
+
 To wake it: `cd envs/example/analysis && tofu apply -var='posture=active' -var='responders=["alice"]'`.
 Expect **roughly six minutes** before SSM is reachable — see the known limitation below.
 
@@ -39,78 +50,141 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**1. Merge PR #3.** Owner's call; CI is green.
+**1. Decide what happens to PR #4.** Mark it ready for review, or merge it. The repo's git
+conventions put merging in the owner's hands, so no session should do it unasked. Worth doing
+either before or after item 2 — acceptance defects would land as follow-up commits on the same
+branch either way.
 
-**2. Reconcile the spec with what acceptance proved.** Three statements in
-`docs/superpowers/specs/2026-09-14-ir-infrastructure-design.md` are now known to be wrong or
-imprecise, and a future reader will trust them:
+**2. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
+item that matters: **not one test in this repository has ever spoken to AWS** — see `CLAUDE.md`'s
+Commands section for the suites and their counts, which belong there rather than here. Phase 1's equivalent run surfaced six defects against a codebase that also
+looked finished.
 
-- **§11 cost model** says "roughly $45/month plus S3" dormant, assuming 500 GB of warm EBS. Measured
-  at the development volume size (100 GB) it is closer to **$15/month**. Active cost is dominated by
-  interface endpoints (~$58/month after the single-AZ change), not the `r6i.large` appliance (~$92).
-  A full acceptance run cost about a dollar.
-- **D13 says "upstream `docker-compose` unmodified"**, which is still true of the compose *file* but
-  now carries a dependency the decision did not anticipate: the compose *binary* must be mirrored,
-  because AL2023 packages none and the VPC has no internet. Worth recording as an amendment rather
-  than silently diverging.
-- **§3.3 / D3 promise "spin-up in minutes"** without qualification. There is a measured floor of
-  about six minutes on reactivation, set by how long a recreated interface endpoint takes to pass
-  traffic. That is still "minutes", but it should be stated rather than discovered.
+Costs a few cents and does not need the appliance — leave the environment dormant. Requires
+`tofu init` first, because the `archive` provider is new in this phase.
 
-**3. `docker-compose` is pinned to `v5.5.1` on no evidence.** It was simply the latest release on
-the day, and it demonstrably works. Nobody has checked it against what Timesketch's compose file
-actually requires. Cheap to verify, and the kind of thing that silently breaks on a later bump.
+The checks most likely to fail, and worth reading the reasoning for before running:
 
-**4. PostgreSQL runs `13-alpine`, not the `13.0-alpine` in Timesketch's `config.env`.** Deliberate:
-the exact 2020 patch release is not on a non-rate-limited registry, and the §4.5 parity invariant
-concerns the *Timesketch* image, not this one. Note that the **already-mirrored image in ECR is
-still the original `13.0-alpine`**, because the mirror is idempotent and skipped it. A fresh
-deployment will get `13-alpine`; this one has not been re-pulled. Harmless, but do not be confused
-by the mismatch.
+- **6 and 7 together.** The object must be under a legal hold *and* have no retain-until date.
+  Either alone passes a weaker reading of §5.2 while getting the retention model wrong.
+- **12.** S3 must reject a mismatched `x-amz-checksum-sha256` at PUT. The whole of A1 rests on
+  this actually happening rather than being assumed.
+- **15 and 16.** These exercise primitives Phase 2 does not build, so that Phase 4's case close
+  does not meet them cold. 16 also proves teardown is possible at all.
 
----
+**3. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
+compose pin; not fixed, because it is in `analysis/` and Phase 2 was scoped to touch nothing there.
 
-## Known limitation, not a defect
+At the pinned `20260630` tag, upstream gives `opensearch`, `postgres` and `redis` healthchecks and
+has `timesketch-web` and `timesketch-worker` wait on `depends_on: condition: service_healthy`.
+`modules/analysis/templates/docker-compose.yml.tftpl` uses plain list-form `depends_on`, so
+Timesketch starts when those containers *start*, not when they are *ready*. OpenSearch takes tens
+of seconds to become ready; `restart: always` retries until it works, which is why Phase 1
+acceptance passed and why this is noisy rather than fatal.
 
-**Reactivation takes about six minutes, not seconds.** Dormancy destroys the interface endpoints,
-and a recreated endpoint reports `available` via the API well before its ENI actually forwards
-packets. The SSM agent starts inside that window, fails, and would hibernate for up to an hour;
-`ssm-endpoint-wait.service` catches that and restarts it once the endpoint responds.
+It is plausibly a contributor to the reactivation floor below, though the endpoint ENI race is the
+measured cause and this has not been separated from it.
 
-Two ways to do better, if it ever matters:
-
-- Keep only the three SSM endpoints alive during dormancy and destroy the other five. Removes the
-  race entirely, at roughly $22/month of dormant cost.
-- Accept it. Six minutes is well inside the design's promise.
-
-This was verified across three full dormancy cycles; the sketch and user survived every one, and
-the `mkfs` guard never fired.
+*Success condition:* the three backing services carry upstream's healthchecks, web and worker gate
+on `service_healthy`, and one activation shows no restart-loop entries for either container in
+`docker compose logs`. Needs a real activation to verify, which costs money and wakes the
+environment — hence the owner's call on when, not whether.
 
 ---
 
-## Phase 2 — evidence store
+## Known limitations, not defects
 
-Next phase per spec §9. Delivers S3 buckets, Object Lock, hashing, the case manifest, and manual
-ingest. Done when an artifact can be ingested by hand and is hashed, immutable, and recorded.
+**The reactivation floor** (roughly six minutes, set by interface endpoint ENI readiness) is
+described in full in spec §3.2 and recorded as amendment A6. Not restated here — it is a measured
+fact, not an open item.
 
-Carry these forward:
+The open *decision* it leaves behind: keeping only the three SSM endpoints alive through dormancy
+would remove the race entirely, at roughly $22/month of dormant cost. **That trade has not been
+taken and nobody has argued for it.** Six minutes is inside D3's promise, so this is a
+cost-versus-convenience call rather than a defect.
 
-- **The S3 endpoint policy lesson applies directly.** Evidence buckets will be reached by more than
-  the instance role. Any access path that is anonymous or presigned by AWS does **not** carry
-  `aws:PrincipalAccount`, and the existing condition will deny it with a 403 that names nothing
-  useful. This already broke `dnf` and would have broken `docker pull`.
-- **Implement `acknowledge_compliance_mode_is_irreversible`** (spec §5.2.1). It is specified and
-  not built. Compliance mode is the only irreversible action in the system, and Phase 2 is where it
-  first becomes reachable.
-- **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` will fail against
-  any bucket holding locked objects. `AdministratorAccess` covers it, but a scoped role would not.
-- **Retention uses variable retention with an event hold** so the clock starts at case closure, not
-  at upload. Default three years (D10).
-- **Object Lock buckets cannot receive S3 server access logs** — use CloudTrail data events. This
-  also resolves the `SNYK-CC-TF-45` finding currently left visible on the tooling bucket; revisit
-  both Snyk lows once a proper log-target bucket exists.
-- Hashing happens **client-side before upload** and is verified on arrival, which also gives free
-  deduplication (spec §4.2).
+Verified across three full dormancy cycles during Phase 1 acceptance; the sketch and user survived
+every one, and the `mkfs` guard never fired.
+
+---
+
+## Phase 2 — evidence store (built, not yet accepted)
+
+Spec §9. Four buckets, two manifest tables, the intake recorder, `irctl`, the compliance-mode guard
+and CloudTrail data events are all implemented on PR #4. What remains is the acceptance run above.
+
+**How it works, why each decision was made, and every gotcha found while building it are in
+`CLAUDE.md`** — the evidence-store section under Architecture, three new entries under "Invariants
+that are expensive to break", and the Testing conventions section. They are durable facts, so they
+live there rather than here. This section is only what is still *open*.
+
+### Open on this phase
+
+- **Whether the tooling-bucket Snyk lows now merit a scoped `.snyk` ignore.** The original objection
+  was that a blanket ignore would exempt Phase 2's evidence buckets; those buckets now exist and
+  carry a real compensating control (CloudTrail data events). Genuinely a judgement call, not a
+  defect. Currently all 13 lows are left visible with reasoning in the file headers.
+- **`irctl` has no `posture` subcommand**, which spec §7 promises alongside `upload` and
+  `case open/close`. `scripts/check.sh dormant|active` covers it today. Decide whether §7's CLI
+  surface is still the intent before Phase 4 builds `case close` and the question resurfaces.
+- **CloudTrail is not wired to CloudWatch Logs** (`SNYK-CC-TF-256`). Alarms on evidence access are
+  worth having, but alerting is Phase 4 work (spec §6) and building half of it here would have been
+  the wrong phase. Fold it into Phase 4's auto-dormancy nudge rather than doing it standalone.
+
+### Deliberately not built, so nobody goes looking
+
+- **No `irctl case close`.** Phase 4 per §9. Acceptance checks 15 and 16 exercise its S3 primitives
+  by hand so that phase does not meet them cold.
+- **The recorder's copy has a 900-second ceiling**, being Lambda-driven. It fails loudly and the
+  object stays in intake. Phase 3 moves the copy into Batch, which removes it.
+- **A sub-second window exists between the copy and the legal hold.** Deliberate — the reasoning is
+  in `_copy_and_hold`. Closing it would mean betting the hold on `CopyObject`'s allowed-argument
+  list, which the managed copy needed above 5 GB does not obviously honour.
+
+### Carried into Phase 3
+
+- **The S3 endpoint policy lesson applies to Phase 3, not Phase 2.** Nothing built here reaches the
+  evidence buckets through the VPC endpoint — `irctl` runs on a responder's machine and the recorder
+  runs outside the VPC. The Batch workers are the first thing that will, and any access path that is
+  anonymous or presigned by AWS does **not** carry `aws:PrincipalAccount`. The existing condition
+  denies it with a 403 that names nothing useful. This already broke `dnf` and would have broken
+  `docker pull`.
+- **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` fails against any
+  bucket holding locked objects. `AdministratorAccess` covers it; a scoped role would not. Teardown
+  is written out at the end of `docs/acceptance/phase-2.md`, including the part that is not obvious:
+  a **legal hold is not cleared by the retention bypass** and must be turned off separately.
+
+---
+
+## Handoff notes
+
+Written at the end of the session that built Phase 2. Opinions, not facts — the facts are in
+`CLAUDE.md`.
+
+**Do the acceptance run before writing any Phase 3 code.** Not because Phase 3 depends on it
+mechanically, but because Phase 2's entire value is an integrity guarantee, and an unverified
+integrity guarantee is worth less than no guarantee — it invites trust it has not earned. Phase 1's
+run found six defects in code that looked just as finished as this does.
+
+**Two things I'd bet are most likely to break on first contact with AWS**, in order:
+
+1. **The `s3.copy` call in the recorder.** It is the only place using boto3's managed transfer
+   rather than a single API call, it crosses buckets with different encryption contexts, and the
+   KMS grants for a cross-bucket copy are exactly the kind of thing `mock_provider` cannot check.
+   If check 4 fails, look at the recorder's CloudWatch log group first.
+2. **The CloudTrail trail creation.** It validates bucket write access at create time, so the
+   `aws:SourceArn` conditions and the new CMK key policy all have to be right simultaneously on the
+   first apply. A failure here fails the whole `tofu apply`, not just the trail.
+
+**What I'd have done next with more time**, beyond the acceptance run: add an `irctl` smoke test
+that runs the real upload path against a stubbed endpoint end to end, rather than per-function
+stubs. The unit tests verify each call in isolation; nothing verifies that `upload` → recorder →
+manifest agree on metadata key names. `case-id` versus `case_id` is precisely the kind of mismatch
+that survives both suites — boto3 lowercases and strips `x-amz-meta-`, and the two sides only agree
+because I checked by hand.
+
+**The PR is deliberately still a draft.** Per the repo's git conventions the owner initiates
+merging; the branch is pushed, CI is green on all four checks, and nothing is waiting on me.
 
 ---
 

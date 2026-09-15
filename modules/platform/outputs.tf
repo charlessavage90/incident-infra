@@ -79,3 +79,58 @@ output "tooling_bucket" {
   value       = aws_s3_bucket.tooling.bucket
   description = "Mirrored tooling binaries. AL2023 has no Docker Compose package and this VPC has no internet."
 }
+
+# --- Phase 2: evidence store (spec 5) ---
+#
+# irctl is configured from these; so is the acceptance gate.
+
+output "intake_bucket" {
+  value       = aws_s3_bucket.intake.bucket
+  description = "Upload target. Objects are recorded and removed from here automatically."
+}
+
+output "evidence_bucket" {
+  value       = aws_s3_bucket.evidence.bucket
+  description = "Raw artifacts under Object Lock and legal hold. Not written to directly."
+}
+
+output "plaso_bucket" {
+  value       = aws_s3_bucket.plaso.bucket
+  description = "Generated timelines. Written by the phase 3 pipeline."
+}
+
+output "audit_bucket" {
+  value       = aws_s3_bucket.audit.bucket
+  description = "CloudTrail data events over the evidence store."
+}
+
+output "cases_table" {
+  value       = aws_dynamodb_table.cases.name
+  description = "Case state: status, retention policy, legal hold flag."
+}
+
+output "artifacts_table" {
+  value       = aws_dynamodb_table.artifacts.name
+  description = "Custody chain, keyed by (case_id, sha256)."
+}
+
+output "responder_policy_arn" {
+  value       = aws_iam_policy.responder.arn
+  description = "Attach to responder principals. Upload and case access only."
+}
+
+output "break_glass_role_arn" {
+  value       = one(aws_iam_role.break_glass[*].arn)
+  description = "Holds s3:BypassGovernanceRetention. Null unless break_glass_principal_arns is set."
+}
+
+# The deployment's retention policy, consumed by irctl when it opens a case.
+#
+# Terraform applies nothing with this -- the clock starts at case close, which is
+# phase 4 work. Exposing it is still the point: without it the policy would live
+# only as a default in the CLI, and a deployment configured for seven years
+# would quietly record three on every case it opened.
+output "retention_years" {
+  value       = var.retention_years
+  description = "Years an artifact is retained after its case closes (D10). Export as IR_RETENTION_YEARS."
+}

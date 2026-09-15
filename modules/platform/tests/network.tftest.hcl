@@ -1,8 +1,20 @@
 mock_provider "aws" {
   # mock_provider invents values for computed attributes, but the AWS provider
-  # validates some of them (ARNs especially) and rejects the invented ones.
-  # OpenTofu 1.12 has no shared-mock `source` argument, so this block is repeated
-  # in each test file in this module. Keep the four in sync.
+  # VALIDATES some of them -- ARNs especially -- and rejects the invented ones.
+  # Anything returned as a list must be mocked too, or it arrives empty.
+  #
+  # OpenTofu 1.12 has no `source` argument on mock_provider, so this block is
+  # duplicated across every test file in this module. IT MUST BE KEPT IN SYNC:
+  # a resource mocked in one file and not another fails only in the other files,
+  # with an error that names the ARN rather than the missing mock.
+  #
+  # Regenerate all of them rather than editing one:
+  #   python scripts/sync-test-mocks.py
+  #
+  # NOTE: mock_resource defaults apply to EVERY instance of a type, so all four
+  # S3 buckets share one mocked ARN. Never assert that a policy does or does not
+  # mention a particular bucket -- it passes vacuously. Assert on actions, which
+  # are literal config.
   mock_data "aws_availability_zones" {
     defaults = {
       names = ["us-east-1a", "us-east-1b", "us-east-1c"]
@@ -12,6 +24,12 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = {
       account_id = "111122223333"
+    }
+  }
+
+  mock_data "aws_region" {
+    defaults = {
+      region = "us-east-1"
     }
   }
 
@@ -27,8 +45,21 @@ mock_provider "aws" {
       arn = "arn:aws:ecr:us-east-1:111122223333:repository/ir-test/placeholder"
     }
   }
+
+  mock_resource "aws_s3_bucket" {
+    defaults = {
+      arn = "arn:aws:s3:::ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_iam_role" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:role/ir-test-mock"
+    }
+  }
 }
 mock_provider "random" {}
+mock_provider "archive" {}
 
 variables {
   name_prefix         = "ir-test"
