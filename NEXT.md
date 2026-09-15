@@ -3,7 +3,7 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-14, Phase 2 built and awaiting its acceptance run.
+**Last updated:** 2026-09-15, just after Phase 2 merged. Awaiting its acceptance run.
 
 ---
 
@@ -13,9 +13,8 @@ Phase 1 is built and acceptance-passed against a real AWS account. **Phase 2 is 
 CI-green, but has never been applied** — every test is offline. Phases 3–4 are specified in the
 design but not started.
 
-PRs #1 (design + plan), #2 (Phase 1 implementation) and #3 (six acceptance defects) are merged.
-**Phase 2 is PR #4 on `feat/phase-2-evidence-store`, still a draft, CI green on all four checks.**
-Nothing is waiting on the previous session; the branch is pushed and the working tree is clean.
+PRs #1–#4 are all merged and their branches deleted. **Phase 2 is on `main`.** There is no open
+branch and nothing is waiting on the previous session.
 
 **The live development environment is DORMANT.** It costs roughly $15/month in that state and
 nothing needs doing to it. What persists:
@@ -29,9 +28,10 @@ nothing needs doing to it. What persists:
 What is destroyed while dormant: the eight VPC interface endpoints. The appliance is *stopped*,
 not terminated.
 
-**None of Phase 2 exists in that account yet.** The first `tofu apply` from PR #4 creates four
-buckets, two DynamoDB tables, a Lambda and a CloudTrail trail — all cheap, and none of them
-affected by posture.
+**None of Phase 2 exists in that account yet** — it is merged, not applied. The next
+`tofu apply` in `envs/example/platform` creates four buckets, two DynamoDB tables, a Lambda and a
+CloudTrail trail — all cheap, and none of them affected by posture. It needs `tofu init` first,
+because the `archive` provider is new in this phase.
 
 **The one thing that apply *modifies* rather than creates is the CMK** — Phase 2 gives it an
 explicit key policy (the why is in `CLAUDE.md`'s invariants). The operational consequence, which
@@ -50,12 +50,7 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**1. Decide what happens to PR #4.** Mark it ready for review, or merge it. The repo's git
-conventions put merging in the owner's hands, so no session should do it unasked. Worth doing
-either before or after item 2 — acceptance defects would land as follow-up commits on the same
-branch either way.
-
-**2. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
+**1. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
 item that matters: **not one test in this repository has ever spoken to AWS** — see `CLAUDE.md`'s
 Commands section for the suites and their counts, which belong there rather than here. Phase 1's equivalent run surfaced six defects against a codebase that also
 looked finished.
@@ -72,7 +67,7 @@ The checks most likely to fail, and worth reading the reasoning for before runni
 - **15 and 16.** These exercise primitives Phase 2 does not build, so that Phase 4's case close
   does not meet them cold. 16 also proves teardown is possible at all.
 
-**3. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
+**2. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
 compose pin; not fixed, because it is in `analysis/` and Phase 2 was scoped to touch nothing there.
 
 At the pinned `20260630` tag, upstream gives `opensearch`, `postgres` and `redis` healthchecks and
@@ -111,7 +106,9 @@ every one, and the `mkfs` guard never fired.
 ## Phase 2 — evidence store (built, not yet accepted)
 
 Spec §9. Four buckets, two manifest tables, the intake recorder, `irctl`, the compliance-mode guard
-and CloudTrail data events are all implemented on PR #4. What remains is the acceptance run above.
+and CloudTrail data events are all implemented and merged. What remains is the acceptance run
+above. **Defects it finds land as fresh commits on a new branch, not on the merged one** — Phase 1
+did the same, and its six fixes became PR #3.
 
 **How it works, why each decision was made, and every gotcha found while building it are in
 `CLAUDE.md`** — the evidence-store section under Architecture, three new entries under "Invariants
@@ -183,8 +180,10 @@ manifest agree on metadata key names. `case-id` versus `case_id` is precisely th
 that survives both suites — boto3 lowercases and strips `x-amz-meta-`, and the two sides only agree
 because I checked by hand.
 
-**The PR is deliberately still a draft.** Per the repo's git conventions the owner initiates
-merging; the branch is pushed, CI is green on all four checks, and nothing is waiting on me.
+**Phase 2 merged before acceptance, deliberately.** That is the same order Phase 1 took: the
+branch had been reviewed and was CI-green, and holding it open through an acceptance run only
+invites drift against `main`. It does mean **`main` currently contains code that has never been
+applied** — which is exactly why the acceptance gate is item 1 rather than a nice-to-have.
 
 ---
 
