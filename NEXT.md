@@ -14,7 +14,8 @@ CI-green, but has never been applied** — every test is offline. Phases 3–4 a
 design but not started.
 
 PRs #1 (design + plan), #2 (Phase 1 implementation) and #3 (six acceptance defects) are merged.
-Phase 2 is PR #4 on `feat/phase-2-evidence-store`.
+**Phase 2 is PR #4 on `feat/phase-2-evidence-store`, still a draft, CI green on all four checks.**
+Nothing is waiting on the previous session; the branch is pushed and the working tree is clean.
 
 **The live development environment is DORMANT.** It costs roughly $15/month in that state and
 nothing needs doing to it. What persists:
@@ -28,6 +29,16 @@ nothing needs doing to it. What persists:
 What is destroyed while dormant: the eight VPC interface endpoints. The appliance is *stopped*,
 not terminated.
 
+**None of Phase 2 exists in that account yet.** The first `tofu apply` from PR #4 creates four
+buckets, two DynamoDB tables, a Lambda and a CloudTrail trail — all cheap, and none of them
+affected by posture.
+
+**The one thing that apply *modifies* rather than creates is the CMK.** Phase 2 replaces its
+default key policy with an explicit one, because CloudTrail is a service principal the default
+policy cannot reach. The `EnableRootAccountAccess` statement is what keeps every existing IAM-based
+grant working — the appliance role's KMS access delegates through it. If the appliance fails to
+start after a Phase 2 apply, that key policy is the first thing to look at, not cloud-init.
+
 To wake it: `cd envs/example/analysis && tofu apply -var='posture=active' -var='responders=["alice"]'`.
 Expect **roughly six minutes** before SSM is reachable — see the known limitation below.
 
@@ -39,7 +50,12 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**1. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
+**1. Decide what happens to PR #4.** Mark it ready for review, or merge it. The repo's git
+conventions put merging in the owner's hands, so no session should do it unasked. Worth doing
+either before or after item 2 — acceptance defects would land as follow-up commits on the same
+branch either way.
+
+**2. Run the Phase 2 acceptance gate.** `docs/acceptance/phase-2.md`, 16 checks. This is the
 item that matters: the module has 46 platform tests and 19 Python tests, and **not one of them
 has spoken to AWS.** Phase 1's equivalent run surfaced six defects against a codebase that also
 looked finished.
@@ -56,7 +72,7 @@ The checks most likely to fail, and worth reading the reasoning for before runni
 - **15 and 16.** These exercise primitives Phase 2 does not build, so that Phase 4's case close
   does not meet them cold. 16 also proves teardown is possible at all.
 
-**2. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
+**3. DEFECT — our compose file dropped upstream's healthcheck gating.** Found while settling the
 compose pin; not fixed, because it is in `analysis/` and Phase 2 was scoped to touch nothing there.
 
 At the pinned `20260630` tag, upstream gives `opensearch`, `postgres` and `redis` healthchecks and
@@ -76,7 +92,7 @@ environment — hence the owner's call on when, not whether.
 
 ---
 
-## Known limitation, not a defect
+## Known limitations, not defects
 
 **Reactivation takes about six minutes, not seconds.** Dormancy destroys the interface endpoints,
 and a recreated endpoint reports `available` via the API well before its ENI actually forwards
@@ -96,56 +112,81 @@ the `mkfs` guard never fired.
 
 ## Phase 2 — evidence store (built, not yet accepted)
 
-Spec §9. Four buckets, two manifest tables, the intake recorder, `irctl`, the compliance-mode
-guard and CloudTrail data events are all implemented on PR #4. What remains is the acceptance
-run above.
+Spec §9. Four buckets, two manifest tables, the intake recorder, `irctl`, the compliance-mode guard
+and CloudTrail data events are all implemented on PR #4. What remains is the acceptance run above.
 
-**Settled during Phase 2 design** (all now in the spec, see §12):
+**How it works, why each decision was made, and every gotcha found while building it are in
+`CLAUDE.md`** — the evidence-store section under Architecture, three new entries under "Invariants
+that are expensive to break", and the Testing conventions section. They are durable facts, so they
+live there rather than here. This section is only what is still *open*.
 
-- Everything lands in `modules/platform/`. Nothing in Phase 2 touches `analysis/`, so the posture
-  toggle is unaffected.
-- `irctl` is **Python + boto3**, tested offline with `botocore.Stubber` — the same no-credentials,
-  no-cost discipline as `mock_provider`. Adds a second CI job.
-- The **intake bucket stays** as a quarantine boundary. S3's PUT-time checksum makes it redundant
-  for transfer corruption, but not for an artifact filed against the wrong case, which per-case
-  compliance mode would make permanent.
-- **Manual means the upload is manual.** Verify, manifest, copy and hold are automatic from the
-  moment the object lands; Phase 3 wraps that recorder in Step Functions rather than replacing it.
+### Open on this phase
 
-**Found while building it, worth not rediscovering:**
+- **Whether the tooling-bucket Snyk lows now merit a scoped `.snyk` ignore.** The original objection
+  was that a blanket ignore would exempt Phase 2's evidence buckets; those buckets now exist and
+  carry a real compensating control (CloudTrail data events). Genuinely a judgement call, not a
+  defect. Currently all 13 lows are left visible with reasoning in the file headers.
+- **`irctl` has no `posture` subcommand**, which spec §7 promises alongside `upload` and
+  `case open/close`. `scripts/check.sh dormant|active` covers it today. Decide whether §7's CLI
+  surface is still the intent before Phase 4 builds `case close` and the question resurfaces.
+- **CloudTrail is not wired to CloudWatch Logs** (`SNYK-CC-TF-256`). Alarms on evidence access are
+  worth having, but alerting is Phase 4 work (spec §6) and building half of it here would have been
+  the wrong phase. Fold it into Phase 4's auto-dormancy nudge rather than doing it standalone.
 
-- **`scripts/sync-test-mocks.py` regenerates the `mock_provider` preamble** in every platform
-  test file from one canonical block. Adding the Lambda broke seven runs in files I had not
-  touched, because only the new test file mocked `aws_iam_role` and the provider validates role
-  ARNs. The error names the ARN, never the missing mock. Edit the script, not one file.
-- **`mock_resource` defaults apply to every instance of a type**, so all four buckets share one
-  ARN under test. Any assertion of the form "this policy does not mention the evidence bucket"
-  passes vacuously. Assert on actions, which are literal config.
-- **`expect_failures` must list every resource that trips a shared precondition.** Both evidence
-  buckets carry the compliance guard; listing one passed while leaving the other reachable.
+### Deliberately not built, so nobody goes looking
 
-**Still true and carried forward:**
+- **No `irctl case close`.** Phase 4 per §9. Acceptance checks 15 and 16 exercise its S3 primitives
+  by hand so that phase does not meet them cold.
+- **The recorder's copy has a 900-second ceiling**, being Lambda-driven. It fails loudly and the
+  object stays in intake. Phase 3 moves the copy into Batch, which removes it.
+- **A sub-second window exists between the copy and the legal hold.** Deliberate — the reasoning is
+  in `_copy_and_hold`. Closing it would mean betting the hold on `CopyObject`'s allowed-argument
+  list, which the managed copy needed above 5 GB does not obviously honour.
 
-- **The S3 endpoint policy lesson applies to Phase 3, not Phase 2.** Nothing built in Phase 2 reaches
-  the evidence buckets through the VPC endpoint — `irctl` runs on a responder's machine and the
-  recorder runs outside the VPC. The Batch workers of Phase 3 are the first thing that will, and any
-  access path that is anonymous or presigned by AWS does **not** carry `aws:PrincipalAccount`. The
-  existing condition denies it with a 403 that names nothing useful. This already broke `dnf` and
-  would have broken `docker pull`.
-- **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` will fail against
-  any bucket holding locked objects. `AdministratorAccess` covers it, but a scoped role would not.
-  The teardown procedure is written out at the end of `docs/acceptance/phase-2.md`, including the
-  part that is not obvious: a **legal hold is not cleared by the retention bypass** and must be
-  turned off separately.
-- **Retention is a legal hold at PUT, then `PutObjectRetention` at case close — in that order.**
-  The clock starts at closure, not at upload. Object Lock has no "event hold" primitive; earlier
-  drafts said it did (A3). Default three years (D10). Phase 4 builds `irctl case close`; acceptance
-  checks 15 and 16 prove the primitives first.
-- **`SNYK-CC-TF-45` and `SNYK-CC-TF-127` now report on four buckets rather than one.** CloudTrail
-  data events are the real compensating control and are built; the rule looks for
-  `aws_s3_bucket_logging`, so it reports regardless, and MFA delete cannot be set from Terraform at
-  all. Full reasoning is in the headers of `evidence.tf` and `audit.tf`. Whether a scoped ignore is
-  now defensible is still open — it is a judgement call, not a defect.
+### Carried into Phase 3
+
+- **The S3 endpoint policy lesson applies to Phase 3, not Phase 2.** Nothing built here reaches the
+  evidence buckets through the VPC endpoint — `irctl` runs on a responder's machine and the recorder
+  runs outside the VPC. The Batch workers are the first thing that will, and any access path that is
+  anonymous or presigned by AWS does **not** carry `aws:PrincipalAccount`. The existing condition
+  denies it with a 403 that names nothing useful. This already broke `dnf` and would have broken
+  `docker pull`.
+- **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` fails against any
+  bucket holding locked objects. `AdministratorAccess` covers it; a scoped role would not. Teardown
+  is written out at the end of `docs/acceptance/phase-2.md`, including the part that is not obvious:
+  a **legal hold is not cleared by the retention bypass** and must be turned off separately.
+
+---
+
+## Handoff notes
+
+Written at the end of the session that built Phase 2. Opinions, not facts — the facts are in
+`CLAUDE.md`.
+
+**Do the acceptance run before writing any Phase 3 code.** Not because Phase 3 depends on it
+mechanically, but because Phase 2's entire value is an integrity guarantee, and an unverified
+integrity guarantee is worth less than no guarantee — it invites trust it has not earned. Phase 1's
+run found six defects in code that looked just as finished as this does.
+
+**Two things I'd bet are most likely to break on first contact with AWS**, in order:
+
+1. **The `s3.copy` call in the recorder.** It is the only place using boto3's managed transfer
+   rather than a single API call, it crosses buckets with different encryption contexts, and the
+   KMS grants for a cross-bucket copy are exactly the kind of thing `mock_provider` cannot check.
+   If check 4 fails, look at the recorder's CloudWatch log group first.
+2. **The CloudTrail trail creation.** It validates bucket write access at create time, so the
+   `aws:SourceArn` conditions and the new CMK key policy all have to be right simultaneously on the
+   first apply. A failure here fails the whole `tofu apply`, not just the trail.
+
+**What I'd have done next with more time**, beyond the acceptance run: add an `irctl` smoke test
+that runs the real upload path against a stubbed endpoint end to end, rather than per-function
+stubs. The unit tests verify each call in isolation; nothing verifies that `upload` → recorder →
+manifest agree on metadata key names. `case-id` versus `case_id` is precisely the kind of mismatch
+that survives both suites — boto3 lowercases and strips `x-amz-meta-`, and the two sides only agree
+because I checked by hand.
+
+**The PR is deliberately still a draft.** Per the repo's git conventions the owner initiates
+merging; the branch is pushed, CI is green on all four checks, and nothing is waiting on me.
 
 ---
 
