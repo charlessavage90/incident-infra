@@ -37,6 +37,16 @@ module "platform" {
   # Smaller than the 500 GB production default; this is a development deployment.
   data_volume_gb = 100
 
+  # Phase 2. GOVERNANCE is the only safe value outside a production IR account:
+  # compliance-locked objects cannot be deleted before expiry by anyone, and this
+  # deployment gets torn down (spec 5.2.2).
+  object_lock_mode = "GOVERNANCE"
+  retention_years  = 3
+
+  # Development deployments get torn down; the manifest here is disposable.
+  # Never set this false in production.
+  manifest_deletion_protection = false
+
   tags = {
     Environment = "development"
   }

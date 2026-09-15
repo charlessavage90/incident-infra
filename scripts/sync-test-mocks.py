@@ -1,4 +1,15 @@
-mock_provider "aws" {
+"""Replace the mock preamble in every platform test file with one canonical block.
+
+OpenTofu 1.12 has no `source` argument on mock_provider, so the block genuinely
+has to be duplicated per file. Duplicated by hand it drifts -- which is exactly
+what just broke: only intake.tftest.hcl mocked aws_iam_role, so every other file
+handed the provider an invented value it rejects as an invalid ARN.
+"""
+
+import pathlib
+import sys
+
+CANONICAL = '''mock_provider "aws" {
   # mock_provider invents values for computed attributes, but the AWS provider
   # VALIDATES some of them -- ARNs especially -- and rejects the invented ones.
   # Anything returned as a list must be mocked too, or it arrives empty.
@@ -61,31 +72,15 @@ mock_provider "aws" {
 mock_provider "random" {}
 mock_provider "archive" {}
 
-variables {
-  name_prefix         = "ir-test"
-  monthly_budget_usd  = 200
-  budget_alert_emails = ["responder@example.com"]
-}
+'''
 
-run "kms_key_rotates_annually" {
-  command = plan
+tests = pathlib.Path("C:/dev/incident-infra/modules/platform/tests")
 
-  assert {
-    condition     = aws_kms_key.main.enable_key_rotation == true
-    error_message = "Platform CMK must have automatic key rotation enabled."
-  }
-}
-
-run "budget_alerts_before_overspend" {
-  command = plan
-
-  assert {
-    condition     = aws_budgets_budget.monthly.limit_amount == "200"
-    error_message = "Budget limit must come from var.monthly_budget_usd."
-  }
-
-  assert {
-    condition     = length(aws_budgets_budget.monthly.notification) == 2
-    error_message = "Budget must notify at both a forecast and an actual threshold."
-  }
-}
+for path in sorted(tests.glob("*.tftest.hcl")):
+    text = path.read_text(encoding="utf-8")
+    marker = "\nvariables {"
+    idx = text.find(marker)
+    if idx == -1:
+        sys.exit("FAIL %s: no top-level variables block to anchor on" % path.name)
+    path.write_text(CANONICAL + text[idx + 1:], encoding="utf-8", newline="\n")
+    print("ok:", path.name)
