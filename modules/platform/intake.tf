@@ -33,9 +33,20 @@ resource "aws_iam_role_policy_attachment" "intake_logs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Note the absence of s3:GetObject. HeadObject returns the metadata and
-# CopyObject is executed server-side by S3, so this role can move evidence
-# without ever being able to read it.
+# s3:GetObject appears exactly once, scoped to intake, and must stay that way.
+#
+# It is not optional and an earlier draft that omitted it did not work: IAM has
+# no s3:HeadObject action -- HeadObject is authorised by s3:GetObject -- and
+# CopyObject requires "s3:GetObject permission to read the source object that is
+# being copied". The recorder 403'd on HeadObject on its first real invocation
+# during Phase 2 acceptance.
+#
+# The property that survives, and the one that actually matters, is the
+# asymmetry: read on intake, write-and-lock on evidence, no read on evidence
+# ever. Object bytes still never pass through the function -- HeadObject returns
+# metadata and the copy is executed server-side by S3 -- so a recorder outside
+# the VPC still cannot exfiltrate the evidence store. Adding a read action to
+# WriteEvidenceUnderHold is what would break that argument.
 resource "aws_iam_role_policy" "intake" {
   name = "${var.name_prefix}-intake-recorder"
   role = aws_iam_role.intake.id
@@ -46,7 +57,7 @@ resource "aws_iam_role_policy" "intake" {
       {
         Sid      = "ReadIntakeMetadata"
         Effect   = "Allow"
-        Action   = ["s3:GetObjectAttributes", "s3:GetObjectVersionAttributes"]
+        Action   = ["s3:GetObject", "s3:GetObjectAttributes", "s3:GetObjectVersionAttributes"]
         Resource = "${aws_s3_bucket.intake.arn}/*"
       },
       {
