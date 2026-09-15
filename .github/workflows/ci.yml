@@ -28,3 +28,28 @@ jobs:
       # All tests use mock_provider: no AWS credentials, no network, no cost.
       - name: check
         run: bash scripts/check.sh check
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Both suites are offline: irctl uses botocore.Stubber and the recorder's
+      # tests are pure functions. No AWS credentials, no network, no cost --
+      # the same discipline mock_provider gives the HCL.
+      - name: irctl tests
+        working-directory: cli
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pytest tests -v
+
+      - name: intake recorder tests
+        working-directory: modules/platform/lambda/intake
+        run: |
+          python -m pip install boto3 pytest
+          python -m pytest test_handler.py -v
