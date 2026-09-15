@@ -208,3 +208,40 @@ run "intake_bucket_refuses_plaintext_transport" {
     error_message = "Evidence must not cross the wire in plaintext."
   }
 }
+
+# Object Lock protects a version, not a name. A plain DeleteObject on a
+# versioned bucket deletes nothing -- it writes a delete marker -- and S3 allows
+# that even on an object under a legal hold. Phase 2 acceptance check 8 found it:
+# the delete "succeeded", while the version underneath refused deletion even with
+# --bypass-governance-retention. Evidence that reads as gone is an integrity
+# failure whether or not the bytes survive, and Phase 3 reads evidence by key.
+run "evidence_buckets_refuse_delete_markers" {
+  command = plan
+
+  assert {
+    condition = length([
+      for s in jsondecode(aws_s3_bucket_policy.evidence.policy).Statement :
+      s if s.Sid == "DenyDeleteMarkers" && s.Effect == "Deny"
+    ]) == 1
+    error_message = "Without this, anyone holding s3:DeleteObject can hide evidence behind a delete marker."
+  }
+
+  assert {
+    condition = length([
+      for s in jsondecode(aws_s3_bucket_policy.plaso.policy).Statement :
+      s if s.Sid == "DenyDeleteMarkers" && s.Effect == "Deny"
+    ]) == 1
+    error_message = "Derived timelines are evidence too, and carry the same Object Lock."
+  }
+
+  # s3:DeleteObjectVersion authorises a versioned delete; s3:DeleteObject
+  # authorises the marker. Denying the second must not deny the first, or
+  # break-glass teardown (spec 5.2.2) becomes impossible.
+  assert {
+    condition = alltrue([
+      for s in jsondecode(aws_s3_bucket_policy.evidence.policy).Statement :
+      s.Sid == "DenyDeleteMarkers" ? !contains(tolist(s.Action), "s3:DeleteObjectVersion") : true
+    ])
+    error_message = "Denying the versioned delete too would make tofu destroy impossible against a locked bucket."
+  }
+}
