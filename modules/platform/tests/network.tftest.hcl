@@ -174,3 +174,16 @@ run "s3_endpoint_policy_allows_aws_owned_buckets" {
     error_message = "S3 endpoint must allow ECR layer buckets, which are presigned by AWS - otherwise docker pull gets 403."
   }
 }
+
+# Gateway endpoints are route-table entries: free, and unaffected by dormancy.
+# The Batch worker writes timeline_id and event_count to the manifest from
+# inside the VPC, and an interface endpoint for DynamoDB would both bill per ENI
+# and -- living in the analysis layer -- disappear when dormant.
+run "dynamodb_reachable_without_an_interface_endpoint" {
+  command = plan
+
+  assert {
+    condition     = aws_vpc_endpoint.dynamodb.vpc_endpoint_type == "Gateway"
+    error_message = "A DynamoDB interface endpoint would bill per ENI and would be destroyed by dormancy; a gateway endpoint is free and permanent."
+  }
+}

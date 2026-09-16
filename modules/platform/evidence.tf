@@ -243,6 +243,27 @@ resource "aws_s3_bucket_policy" "evidence" {
   policy = local.locked_bucket_policy["evidence"]
 }
 
+# Amendment A11: the pipeline trigger fans out from evidence, not from intake.
+#
+# Spec 4.1's diagram had intake feeding both the recorder and EventBridge. That
+# predates the recorder clearing the intake object once recorded -- a pipeline
+# started from intake would race a DeleteObject and read a bucket whose contents
+# expire in intake_expiry_days. Evidence is the first place an artifact is both
+# immutable and permanent.
+#
+# This resource lives in the permanent layer while the RULE it feeds lives in
+# modules/analysis, gated on posture. That split is the point: the bucket always
+# publishes, and whether anything is listening is what dormancy decides.
+#
+# Deliberately no lambda_function block. aws_s3_bucket_notification is a
+# whole-bucket resource -- a second one targeting the same bucket silently
+# replaces the first, which is how the intake recorder's notification would
+# vanish if this were ever mis-targeted.
+resource "aws_s3_bucket_notification" "evidence" {
+  bucket      = aws_s3_bucket.evidence.id
+  eventbridge = true
+}
+
 resource "aws_s3_bucket_policy" "plaso" {
   bucket = aws_s3_bucket.plaso.id
   policy = local.locked_bucket_policy["plaso"]

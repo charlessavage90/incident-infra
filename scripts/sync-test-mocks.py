@@ -74,7 +74,7 @@ mock_provider "archive" {}
 
 '''
 
-tests = pathlib.Path("C:/dev/incident-infra/modules/platform/tests")
+tests = pathlib.Path(__file__).resolve().parent.parent / "modules" / "platform" / "tests"
 
 for path in sorted(tests.glob("*.tftest.hcl")):
     text = path.read_text(encoding="utf-8")

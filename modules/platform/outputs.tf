@@ -134,3 +134,30 @@ output "retention_years" {
   value       = var.retention_years
   description = "Years an artifact is retained after its case closes (D10). Export as IR_RETENTION_YEARS."
 }
+
+# --- Phase 3: what the pipeline layer consumes ---
+
+output "plaso_worker_repository_url" {
+  value       = aws_ecr_repository.worker.repository_url
+  description = "ECR repository for the built plaso worker image."
+}
+
+output "evidence_bucket_arn" {
+  value       = aws_s3_bucket.evidence.arn
+  description = "Evidence bucket ARN. The Batch worker is the first component that legitimately reads it (amendment A12)."
+}
+
+output "plaso_bucket_arn" {
+  value       = aws_s3_bucket.plaso.arn
+  description = "Destination for .plaso files produced by the worker."
+}
+
+output "cases_table_arn" {
+  value       = aws_dynamodb_table.cases.arn
+  description = "Case store ARN."
+}
+
+output "artifacts_table_arn" {
+  value       = aws_dynamodb_table.artifacts.arn
+  description = "Artifact manifest ARN, for the claim step and the worker's finalisation."
+}

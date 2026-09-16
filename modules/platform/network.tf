@@ -107,6 +107,25 @@ resource "aws_route" "private_egress" {
   nat_gateway_id         = aws_nat_gateway.main[0].id
 }
 
+# --- DynamoDB gateway endpoint ---
+#
+# Free, like the S3 one, and in the permanent layer for the same reason: the
+# Batch worker updates the artifact manifest from inside the VPC, and a control
+# path that dormancy can destroy has no business in the chain of custody.
+#
+# No policy. Unlike S3, nothing in this design writes evidence to DynamoDB, so
+# there is no cross-account exfiltration path to close here -- and an endpoint
+# policy scoped to this account's tables would have to be kept in step with
+# every table Phase 4 adds.
+resource "aws_vpc_endpoint" "dynamodb" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${data.aws_region.current.region}.dynamodb"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = merge(local.common_tags, { Name = "${var.name_prefix}-dynamodb" })
+}
+
 # --- S3 gateway endpoint ---
 #
 # Free, and always present regardless of posture. ECR image layers are stored in
