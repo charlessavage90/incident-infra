@@ -219,3 +219,65 @@ resource "aws_s3_bucket_policy" "intake" {
     ]
   })
 }
+
+# Object Lock protects a version, not a name.
+#
+# A DeleteObject with no version ID on a versioned bucket deletes nothing -- it
+# writes a delete marker and returns 204. S3 permits that on an object under a
+# legal hold, and Phase 2 acceptance check 8 hit it: the delete "succeeded",
+# while the version underneath refused deletion even with
+# --bypass-governance-retention. So the bytes were never at risk, and the
+# artifact still vanished from every read-by-key path and from a plain listing.
+# For an evidence store that is an integrity failure on its own, and Phase 3's
+# workers read evidence by key.
+#
+# s3:DeleteObject authorises the marker; s3:DeleteObjectVersion authorises a
+# versioned delete. Only the first is denied -- denying both would make the
+# break-glass teardown in spec 5.2.2 impossible, and `tofu destroy` against a
+# development deployment along with it.
+#
+# Nothing in this design deletes from these buckets. The recorder's DeleteObject
+# is scoped to intake; responders have none.
+resource "aws_s3_bucket_policy" "evidence" {
+  bucket = aws_s3_bucket.evidence.id
+  policy = local.locked_bucket_policy["evidence"]
+}
+
+resource "aws_s3_bucket_policy" "plaso" {
+  bucket = aws_s3_bucket.plaso.id
+  policy = local.locked_bucket_policy["plaso"]
+}
+
+# Keyed by name rather than by ARN. Under mock_provider both buckets carry one
+# invented ARN, so an ARN-keyed map is a duplicate-key error at plan time in
+# every test in this module.
+locals {
+  locked_bucket_policy = {
+    for name, arn in {
+      evidence = aws_s3_bucket.evidence.arn
+      plaso    = aws_s3_bucket.plaso.arn
+    } :
+    name => jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid       = "DenyDeleteMarkers"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = ["s3:DeleteObject"]
+          Resource  = "${arn}/*"
+        },
+        {
+          Sid       = "DenyInsecureTransport"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = "s3:*"
+          Resource  = [arn, "${arn}/*"]
+          Condition = {
+            Bool = { "aws:SecureTransport" = "false" }
+          }
+        },
+      ]
+    })
+  }
+}

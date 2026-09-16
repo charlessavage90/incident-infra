@@ -147,17 +147,37 @@ run "recorder_is_not_attached_to_the_vpc" {
   }
 }
 
-# It reads metadata and drives a server-side copy. It never reads object bytes,
-# which is what makes running it outside the VPC defensible.
-run "recorder_cannot_read_object_content" {
+# The recorder can read an artifact sitting in intake and can never read one in
+# evidence. That asymmetry, not a blanket absence of s3:GetObject, is what makes
+# running it outside the VPC defensible.
+#
+# The blanket version was asserted here until the Phase 2 acceptance run, and it
+# was not achievable: IAM has no s3:HeadObject action -- HeadObject is authorised
+# by s3:GetObject -- and CopyObject requires "s3:GetObject permission to read the
+# source object that is being copied". The recorder 403'd on HeadObject on its
+# first real invocation. mock_provider cannot know either fact, so this file
+# asserted an impossibility and passed.
+#
+# Asserted via Sid, because Sids and Actions are literal config. Resource ARNs
+# are not usable here: mock_resource gives all four buckets one invented ARN, so
+# "this statement names intake, not evidence" passes vacuously.
+run "recorder_can_read_intake_but_never_evidence" {
   command = plan
 
   assert {
-    condition = !anytrue([
+    condition = [
       for s in jsondecode(aws_iam_role_policy.intake.policy).Statement :
-      contains(s.Action, "s3:GetObject")
+      s.Sid if contains(s.Action, "s3:GetObject")
+    ] == ["ReadIntakeMetadata"]
+    error_message = "s3:GetObject belongs only on the intake-scoped statement. Anywhere else and the recorder can read the evidence store."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(aws_iam_role_policy.intake.policy).Statement :
+      s.Sid == "WriteEvidenceUnderHold" ? !contains(s.Action, "s3:GetObject") && !contains(s.Action, "s3:GetObjectAttributes") : true
     ])
-    error_message = "A component that cannot read evidence cannot leak it. HeadObject and a server-side CopyObject are enough."
+    error_message = "The recorder writes evidence and locks it. It must never be able to read it back."
   }
 
   assert {

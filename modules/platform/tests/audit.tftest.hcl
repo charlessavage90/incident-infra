@@ -129,3 +129,18 @@ run "key_policy_lets_cloudtrail_encrypt_and_keeps_root" {
     error_message = "CloudTrail is a service principal, not an account principal, so the default key policy does not reach it."
   }
 }
+
+# The intake recorder's log group is CMK-encrypted, and CloudWatch Logs encrypts
+# it as a service principal -- so the same gap that stops CloudTrail stops this.
+# It failed the Phase 2 acceptance apply: CreateLogGroup returned AccessDenied
+# naming the log group ARN, never the key.
+run "key_policy_lets_cloudwatch_logs_encrypt" {
+  command = plan
+
+  assert {
+    condition = length([
+      for s in jsondecode(aws_kms_key.main.policy).Statement : s if s.Sid == "AllowCloudWatchLogsEncrypt"
+    ]) == 1
+    error_message = "A CMK-encrypted log group cannot be created unless the key policy names the CloudWatch Logs service principal."
+  }
+}

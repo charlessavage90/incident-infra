@@ -22,17 +22,21 @@ changing anything structural:
   call, and no `prevent_destroy` on the evidence buckets
 - `docs/acceptance/phase-1.md` — the acceptance gate, plus a table of the six defects the first
   real run exposed
-- `docs/acceptance/phase-2.md` — the Phase 2 gate. **Not yet run.**
+- `docs/acceptance/phase-2.md` — the Phase 2 gate, plus a table of the three defects its first
+  real run exposed
 
-Phase 1 (platform, appliance, dormancy) is complete and acceptance-passed. **Phase 2 (evidence
-store) is built and CI-green but has never been applied** — every test is offline, so "passing"
-and "works" are not the same claim here. Phases 3–4 (ingest pipeline, lifecycle) are specified
-but not built.
+Phases 1 and 2 are complete and acceptance-passed against a real AWS account. Phases 3–4 (ingest
+pipeline, lifecycle) are specified but not built.
 
-The design document carries an **§12 Amendments** table. Six corrections have been made in place
+**Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
+Phase 1's acceptance run found six defects in code that looked finished; Phase 2's found three,
+all of them authorisation failures that `mock_provider` cannot see. Assume the next phase behaves
+the same way.
+
+The design document carries an **§12 Amendments** table. Eight corrections have been made in place
 rather than in a parallel errata file; read §12 before trusting a remembered reading of that
-document. A1, A3 and A4 changed load-bearing behaviour; A2 records a code defect that is still
-open and tracked in `NEXT.md`.
+document. A1, A3, A4, A7 and A8 changed load-bearing behaviour; A2 records a code defect that is
+still open and tracked in `NEXT.md`.
 
 ## Commands
 
@@ -89,7 +93,7 @@ cost. Current counts — **check them, a filter that matches nothing still repor
 
 | Suite | Count |
 |---|---|
-| `modules/platform` | 46 run blocks |
+| `modules/platform` | 48 run blocks |
 | `modules/images` | 7 |
 | `modules/analysis` | 26 |
 | `cli` | 16 tests |
@@ -152,18 +156,28 @@ irctl upload  --▶  intake bucket  --s3:ObjectCreated--▶  recorder Lambda  --
    at PUT
 ```
 
-**The recorder runs outside the VPC and has no `s3:GetObject`.** Both are deliberate and both are
-load-bearing:
+**The recorder runs outside the VPC, and can read intake but never evidence.** Both are deliberate
+and both are load-bearing:
 
 - *Outside the VPC*, because in-VPC placement would put it behind the interface endpoints that
   dormancy destroys. An artifact arriving between incidents would then sit unrecorded in a bucket
   with a 7-day expiry, and the gap would be silent. Recording is not posture-gated; the Phase 3
   pipeline that timelines an artifact will be, because that needs a running appliance (spec §5.5).
-- *No `GetObject`*, because it never needs one. `HeadObject` returns the metadata and `CopyObject`
-  is executed server-side by S3, so no object bytes pass through the function. That is what makes
-  running it outside the VPC defensible rather than a concession — a component that cannot read
-  evidence cannot leak it. **If you ever find yourself adding `GetObject` to that role, the design
-  has changed and this argument no longer holds.**
+- *Read on intake, never on evidence.* No object bytes pass through the function: `HeadObject`
+  returns the metadata and `CopyObject` is executed server-side by S3. That is what makes running
+  it outside the VPC defensible rather than a concession — a component that cannot read the
+  evidence store cannot leak it.
+
+  **`s3:GetObject` appears exactly once in that role, scoped to intake, and it is not optional.**
+  IAM has no `s3:HeadObject` action — `HeadObject` is authorised by `s3:GetObject` — and
+  `CopyObject` requires `s3:GetObject` on the source object it copies. An earlier draft withheld
+  it on the belief that `GetObjectAttributes` would do; the recorder 403'd on `HeadObject` on its
+  first real invocation (amendment A7). `GetObjectAttributes` cannot substitute: it does not
+  return user metadata, which is where `sha256`, `case-id` and `source` live.
+
+  **What must never change is the asymmetry.** Adding any read action to the evidence-scoped
+  statement is what would break this argument. The test asserts that `s3:GetObject` appears on the
+  `ReadIntakeMetadata` statement and nowhere else.
 
 **The manifest row is written before the copy, with a `status` field.** A failed copy then leaves a
 recoverable trace rather than none. The conditional write is deliberately not a plain
@@ -249,6 +263,23 @@ Spec §5.2 requires the clock to start when the case *closes*. Adding a
 nothing will tell you — there is no error, no warning, and the mistake only surfaces years later.
 A test asserts the absence.
 
+**Object Lock protects a version, not a name, so the locked buckets deny `s3:DeleteObject`.**
+A `DeleteObject` with no version ID on a versioned bucket deletes nothing — it writes a delete
+marker and returns 204 — and S3 permits that on an object under a legal hold. The bytes are never
+at risk, but the artifact disappears from `aws s3 ls` and from every read-by-key path, and Phase 3
+reads evidence by key. Phase 2 acceptance check 8 found this (amendment A8).
+
+The deny in `evidence.tf` is deliberately narrow, and the narrowness is the part to preserve:
+`s3:DeleteObject` authorises the marker, `s3:DeleteObjectVersion` authorises a versioned delete.
+Denying both would make §5.2.2 break-glass teardown — and `tofu destroy` against a development
+deployment — impossible.
+
+Two related facts, both established against a live bucket rather than assumed:
+
+- **A legal hold outranks `--bypass-governance-retention`.** The bypass does not touch a hold; the
+  hold must be cleared separately, which is why teardown has that extra step.
+- **Break-glass deletion must target a version**, or the new bucket policy refuses it first.
+
 **Legal hold at PUT, retention at case close, in that order.** S3 Object Lock has two primitives,
 not three: a retention period and one boolean legal hold. There is no "event hold" — earlier drafts
 of the spec named one and there is nothing to build against (amendment A3). The order is not
@@ -257,12 +288,22 @@ deletable by anything holding `s3:DeleteObject`. The one boolean serves two mean
 for an open case, and D9's litigation flag — distinguished in the manifest, because S3 cannot
 distinguish them.
 
-**The CMK has an explicit key policy, and its root statement is not optional.** CloudTrail is a
-*service* principal, and the default key policy grants the account root with IAM delegating from
-there — which never reaches a service. Without the `AllowCloudTrailEncrypt` statement the trail
-fails at apply with an error that does not name the key. But an explicit key policy that omits
+**The CMK has an explicit key policy, and its root statement is not optional.** The default key
+policy grants the account root and lets IAM delegate from there — which never reaches a *service*
+principal. Two of them need naming explicitly, and each was discovered by an apply failing:
+
+- `AllowCloudTrailEncrypt`, without which the trail fails at apply.
+- `AllowCloudWatchLogsEncrypt`, without which the intake recorder's CMK-encrypted log group fails
+  with `CreateLogGroup: AccessDeniedException` (amendment A7's sibling; Phase 2 acceptance defect 1).
+
+**Neither error names the key** — CloudTrail's names the trail, CloudWatch Logs' names the log
+group ARN. Any future CMK-encrypted resource owned by a service rather than by an account
+principal will need the same treatment, and will fail the same uninformative way.
+
+**The root statement is the one that cannot be dropped.** An explicit key policy that omits
 `EnableRootAccountAccess` **cannot be edited by anyone**, and the key becomes unusable and
-undeletable except by scheduling deletion. Do not tidy it away. A test asserts both statements.
+undeletable except by scheduling deletion. Do not tidy it away. A test asserts all three
+statements.
 
 ### `modules/analysis/templates/cloud-init.sh.tftpl`
 
@@ -374,6 +415,12 @@ All verified against upstream sources during design; each shaped a decision.
   `.server_side_encryption`, and `aws_s3_bucket_notification.lambda_function[*].events`. Use
   `one(...)`, and compare a set against `toset([...])` — `tolist([...])` fails on type even when
   the contents match.
+- **A test can assert an impossibility and pass.** `mock_provider` evaluates config, not AWS
+  semantics, so it cannot know that `HeadObject` is authorised by `s3:GetObject` or that S3 lets a
+  delete marker be written over a legal hold. Two Phase 2 tests passed for years' worth of CI
+  against invariants AWS does not implement. When an assertion encodes a *behaviour* of a service
+  rather than a *shape* of the config, only an acceptance run can confirm it — say so at the
+  assertion.
 - **Project attribute-by-attribute rather than reading a whole block object.** `one(rule)` on a
   lifecycle rule pulls in its deprecated `prefix` and emits a warning against a perfectly good
   config; `one([for r in ...rule : one(r.expiration).days])` does not.
