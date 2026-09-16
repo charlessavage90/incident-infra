@@ -70,3 +70,30 @@ resource "aws_secretsmanager_secret_version" "responder" {
   secret_id     = aws_secretsmanager_secret.responder[each.key].id
   secret_string = random_password.responder[each.key].result
 }
+
+# The pipeline's own Timesketch account.
+#
+# Timesketch auth is local accounts, SSO_ENABLED, or GOOGLE_OIDC_* -- there is
+# no AWS IAM integration, so the Batch worker cannot present a role and must
+# present a password like any other client. A named account rather than a shared
+# responder login, because Timesketch attributes every timeline to a user and
+# "which human imported this" should not be answered with "a robot using
+# Alice's credentials".
+resource "random_password" "pipeline" {
+  length  = 32
+  special = true
+}
+
+resource "aws_secretsmanager_secret" "pipeline" {
+  name                    = "${var.name_prefix}/pipeline"
+  kms_key_id              = var.kms_key_arn
+  description             = "Timesketch login used by the plaso worker to import timelines"
+  recovery_window_in_days = 7
+
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "pipeline" {
+  secret_id     = aws_secretsmanager_secret.pipeline.id
+  secret_string = random_password.pipeline.result
+}

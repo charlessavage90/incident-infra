@@ -115,3 +115,75 @@ variable "tags" {
   description = "Additional tags applied to every resource."
   default     = {}
 }
+
+# --- Phase 3: the ingest pipeline ---
+
+variable "evidence_bucket" {
+  type        = string
+  description = "Evidence bucket name, from the platform layer."
+}
+
+variable "evidence_bucket_arn" {
+  type        = string
+  description = "Evidence bucket ARN, from the platform layer."
+}
+
+variable "plaso_bucket" {
+  type        = string
+  description = "Destination bucket for .plaso files, from the platform layer."
+}
+
+variable "plaso_bucket_arn" {
+  type        = string
+  description = "Plaso bucket ARN, from the platform layer."
+}
+
+variable "artifacts_table" {
+  type        = string
+  description = "Artifact manifest table name, from the platform layer."
+}
+
+variable "artifacts_table_arn" {
+  type        = string
+  description = "Artifact manifest table ARN, from the platform layer."
+}
+
+# Instance families carrying NVMe instance storage.
+#
+# This is amendment A9's argument made concrete: plaso is disk-bound and D8
+# targets 100 GB to 1 TB per incident, so scratch is local NVMe rather than a
+# network volume attached per task. An instance type without instance storage
+# still works -- templates/scratch.sh.tftpl falls back to the root volume -- but
+# slowly, and the fallback is a safety net, not a plan.
+variable "worker_instance_types" {
+  type        = list(string)
+  description = "Batch compute environment instance types. Must carry NVMe instance storage."
+  default     = ["i4i.2xlarge", "c6id.4xlarge"]
+}
+
+# Sized to consume a whole instance, which is how Batch on EC2 approximates the
+# per-task isolation Fargate gives structurally. A fleet processing live malware
+# should not co-schedule two cases on one kernel.
+variable "worker_job_vcpus" {
+  type        = number
+  description = "vCPUs per job. Set to a whole instance's count to keep one job per host."
+  default     = 8
+}
+
+variable "worker_job_memory_mib" {
+  type        = number
+  description = "Memory per job, MiB. Leave headroom below the instance total for the ECS agent."
+  default     = 58000
+}
+
+variable "worker_max_vcpus" {
+  type        = number
+  description = "Ceiling on the compute environment. Bounds spend during a large incident."
+  default     = 64
+}
+
+variable "worker_root_volume_gb" {
+  type        = number
+  description = "Root volume for worker instances. Scratch is instance store; this is the OS and image layers only."
+  default     = 100
+}

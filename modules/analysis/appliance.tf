@@ -14,7 +14,7 @@ data "aws_ami" "al2023" {
 
 # Digest-pinned image references published by the images module (spec 4.5).
 data "aws_ssm_parameter" "image" {
-  for_each = toset(["timesketch", "opensearch", "postgres", "redis"])
+  for_each = toset(["timesketch", "opensearch", "postgres", "redis", "plaso-worker"])
   name     = "${var.image_digest_parameter_prefix}/${each.key}"
 }
 
@@ -40,6 +40,10 @@ locals {
   num_wsgi_workers = (lookup(local.instance_vcpus, var.instance_type, 2) * 2) + 1
 
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.region}.amazonaws.com"
+
+  # Named once. The Batch job definition, the cloud-init account creation and
+  # LOCAL_AUTH_ALLOWED_USERS must all agree, and three string literals would not.
+  pipeline_user = "pipeline"
 
   timesketch_conf = templatefile("${path.module}/templates/timesketch.conf.tftpl", {
     secret_key               = random_password.timesketch_secret_key.result

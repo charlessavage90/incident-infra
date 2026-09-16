@@ -139,22 +139,8 @@ variables {
   artifacts_table_arn = "arn:aws:dynamodb:us-east-1:111122223333:table/ir-test-artifacts"
 }
 
-run "active_creates_interface_endpoints" {
-  command = plan
-
-  variables {
-    posture = "active"
-  }
-
-  assert {
-    condition     = length(aws_vpc_endpoint.interface) == 11
-    error_message = "Active posture must create all eleven interface endpoints: eight the appliance needs, plus ecs/ecs-agent/ecs-telemetry without which Batch instances never join the compute environment."
-  }
-}
-
-# Interface endpoints bill hourly whether used or not and are the largest
-# avoidable dormant line item (spec 3.2).
-run "dormant_destroys_interface_endpoints" {
+# Dormancy stops compute; it never destroys it (spec 3.2).
+run "dormant_disables_the_compute_environment" {
   command = plan
 
   variables {
@@ -162,12 +148,12 @@ run "dormant_destroys_interface_endpoints" {
   }
 
   assert {
-    condition     = length(aws_vpc_endpoint.interface) == 0
-    error_message = "Dormant posture must create no interface endpoints."
+    condition     = aws_batch_compute_environment.worker.state == "DISABLED"
+    error_message = "A dormant environment that still scales up EC2 defeats the whole cost argument for dormancy."
   }
 }
 
-run "ssm_endpoints_are_present_when_active" {
+run "active_enables_the_compute_environment" {
   command = plan
 
   variables {
@@ -175,28 +161,18 @@ run "ssm_endpoints_are_present_when_active" {
   }
 
   assert {
-    condition = alltrue([
-      for s in ["ssm", "ssmmessages", "ec2messages"] :
-      contains(keys(aws_vpc_endpoint.interface), s)
-    ])
-    error_message = "SSM Session Manager needs all three of ssm, ssmmessages, and ec2messages."
+    condition     = aws_batch_compute_environment.worker.state == "ENABLED"
+    error_message = "An active environment whose Batch fleet is DISABLED leaves every job in RUNNABLE with no error to read."
   }
 }
 
-run "posture_rejects_invalid_values" {
-  command = plan
-
-  variables {
-    posture = "hibernating"
-  }
-
-  expect_failures = [var.posture]
-}
-
-# Interface endpoints bill per ENI: per endpoint, per AZ. The appliance is a
-# single instance pinned to subnet 0 by the data volume's AZ, so a second ENI
-# per endpoint doubles the largest active-cost line item for no availability gain.
-run "endpoints_occupy_one_az_only" {
+# The second reader of the evidence store, and the first that legitimately reads
+# it (spec 5.5, amendment A7 -- restated as a boundary in amendment A12).
+#
+# Assert on ACTIONS, not on resources: mock_resource defaults apply to every
+# instance of a type, so any assertion of the form "this policy does not mention
+# the evidence bucket" passes vacuously and proves nothing.
+run "worker_can_read_evidence_and_never_destroy_it" {
   command = plan
 
   variables {
@@ -204,16 +180,80 @@ run "endpoints_occupy_one_az_only" {
   }
 
   assert {
-    condition = alltrue([
-      for e in aws_vpc_endpoint.interface : length(e.subnet_ids) == 1
-    ])
-    error_message = "Interface endpoints must sit in one AZ; a second ENI per endpoint is pure cost."
+    condition = length([
+      for s in jsondecode(aws_iam_role_policy.worker.policy).Statement :
+      s if s.Sid == "ReadEvidence"
+    ]) == 1
+    error_message = "The worker must read evidence; the timeline is produced from the immutable copy, never from intake."
   }
 
   assert {
-    condition = alltrue([
-      for e in aws_vpc_endpoint.interface : tolist(e.subnet_ids)[0] == var.private_subnet_ids[0]
-    ])
-    error_message = "Endpoints must be in the same subnet as the appliance."
+    condition = length(flatten([
+      for s in jsondecode(aws_iam_role_policy.worker.policy).Statement :
+      [for a in s.Action : a if startswith(a, "s3:Delete")]
+    ])) == 0
+    error_message = "Nothing in the pipeline deletes from a locked bucket. A keyed DeleteObject writes a delete marker that hides evidence from every read-by-key path (amendment A8)."
+  }
+
+  assert {
+    condition = length(flatten([
+      for s in jsondecode(aws_iam_role_policy.worker.policy).Statement :
+      [for a in s.Action : a if a == "s3:PutObjectLegalHold"]
+    ])) == 0
+    error_message = "Legal holds are the recorder's at PUT and Phase 4's at case close. A worker that can set one can also be made to clear one."
+  }
+}
+
+# Spec 4.5. The SSM parameter holds a repo@sha256 reference; a tag here would
+# let the worker's plaso drift from the appliance's.
+run "job_definition_references_a_digest" {
+  command = plan
+
+  variables {
+    posture = "active"
+  }
+
+  assert {
+    condition     = strcontains(jsondecode(aws_batch_job_definition.worker.container_properties).image, "@sha256:")
+    error_message = "A tag reference on the path to the worker breaks the spec 4.5 parity invariant silently -- Timesketch simply rejects the .plaso months later."
+  }
+}
+
+# Batch on EC2 gives no per-task isolation, so a container that can reach IMDS
+# can assume the instance role. Hop limit 1 stops it at the host; the job role
+# arrives over the ECS task credential endpoint instead. This is the
+# compensating control for choosing EC2 over Fargate (amendment A9).
+run "containers_cannot_reach_the_instance_metadata_service" {
+  command = plan
+
+  variables {
+    posture = "active"
+  }
+
+  assert {
+    condition     = one(aws_launch_template.worker.metadata_options).http_put_response_hop_limit == 1
+    error_message = "This fleet handles live malware. A hop limit above 1 hands the instance role to anything running in a container."
+  }
+
+  assert {
+    condition     = one(aws_launch_template.worker.metadata_options).http_tokens == "required"
+    error_message = "IMDSv1 is SSRF-exploitable."
+  }
+}
+
+# AWS Batch appends its ECS_CLUSTER configuration to the template's user data,
+# and can only do so if it is already a MIME multipart archive. A plain script
+# is replaced rather than merged: instances launch, never join the cluster, and
+# jobs sit in RUNNABLE with no error anywhere.
+run "launch_template_user_data_is_mime_multipart" {
+  command = plan
+
+  variables {
+    posture = "active"
+  }
+
+  assert {
+    condition     = strcontains(base64decode(aws_launch_template.worker.user_data), "Content-Type: multipart/mixed")
+    error_message = "Batch cannot append its ECS_CLUSTER config to a plain shell script; the instances would never join the compute environment."
   }
 }

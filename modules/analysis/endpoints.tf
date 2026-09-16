@@ -28,6 +28,13 @@ locals {
     "logs",
     "secretsmanager",
     "kms",
+    # Batch on EC2 is ECS underneath. Without these three the worker instances
+    # launch and look healthy, the ECS agent cannot register them, and every job
+    # sits in RUNNABLE indefinitely -- with nothing in Batch, in ECS, or on the
+    # instance that names the cause.
+    "ecs",
+    "ecs-agent",
+    "ecs-telemetry",
   ]) : toset([])
 }
 
@@ -58,13 +65,16 @@ resource "aws_vpc_endpoint" "interface" {
   # One AZ, not both.
   #
   # Interface endpoints bill per ENI, meaning per endpoint per AZ. Spanning two
-  # subnets doubles the largest active-cost line item -- roughly $117/month
-  # instead of $58 at eight endpoints -- and buys nothing here: the appliance is
+  # subnets doubles the largest active-cost line item -- roughly $160/month
+  # instead of $80 at eleven endpoints -- and buys nothing here: the appliance is
   # a single instance in subnet 0, pinned there by the data volume's AZ. If that
   # AZ fails the appliance is down regardless, so the second ENI adds cost
   # without adding availability.
   #
-  # Phase 3 should revisit this if the Batch fleet spans availability zones.
+  # Phase 3 revisited this and kept it. The Batch fleet is pinned to the same
+  # subnet (batch.tf), so compute is still single-AZ and the argument holds
+  # unchanged. Spanning the fleet across AZs without spanning these endpoints
+  # would strand workers in an AZ with no ENI to reach ECR or S3 through.
   subnet_ids = [var.private_subnet_ids[0]]
 
   security_group_ids  = [aws_security_group.endpoints.id]
