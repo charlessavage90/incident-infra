@@ -200,3 +200,21 @@ run "secrets_are_namespaced_by_deployment" {
     error_message = "Secrets must be namespaced under name_prefix so dev and prod can coexist."
   }
 }
+
+# The worker authenticates to Timesketch as a named account, not as a responder.
+# Timesketch attributes every timeline to a user, and attribution is the reason
+# responder logins are never shared (spec 3.4) -- the pipeline is no different.
+run "pipeline_has_its_own_account" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = aws_secretsmanager_secret.pipeline.name == "ir-test/pipeline"
+    error_message = "The worker reads this secret by name from its job definition environment; the two must agree."
+  }
+
+  assert {
+    condition     = random_password.pipeline.length >= 32
+    error_message = "Generated passwords must be at least 32 characters."
+  }
+}

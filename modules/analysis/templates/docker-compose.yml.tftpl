@@ -23,6 +23,14 @@ services:
         hard: 65536
     volumes:
       - /mnt/data/opensearch:/usr/share/opensearch/data
+    # Upstream's, verbatim at the pinned tag. Our derived file had dropped all
+    # three healthchecks and the service_healthy gating that depends on them --
+    # the one part of that delta that was never deliberate (spec A2).
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=50s"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
 
   postgres:
     image: ${postgres_image}
@@ -33,18 +41,35 @@ services:
       - POSTGRES_DB=timesketch
     volumes:
       - /mnt/data/postgresql:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U timesketch -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: ${redis_image}
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   timesketch-web:
     image: ${timesketch_image}
     command: timesketch-web
     restart: always
-    # Bound to loopback only. Reached via SSM port-forward (D6).
+    # Bound on all interfaces, not loopback.
+    #
+    # D6 forbids PUBLIC ingress and this is not that: the instance has no public
+    # IP, the VPC has no internet gateway, and the appliance security group
+    # admits exactly two sources -- the operator's connector CIDRs and the plaso
+    # worker's security group. The Batch worker imports timelines over this
+    # port; a loopback bind would leave it holding a .plaso it cannot deliver.
+    # SSM port-forward is unaffected.
     ports:
-      - "127.0.0.1:5000:5000"
+      - "5000:5000"
     environment:
       - NUM_WSGI_WORKERS=${num_wsgi_workers}
       - WSGI_WORKER_CLASS=gthread
@@ -57,10 +82,17 @@ services:
       # omitting it crash-loops the web container. On the data volume so the
       # record survives dormancy.
       - /mnt/data/logs:/var/log/timesketch
+    # Upstream gates on readiness and our derived file did not (spec A2).
+    # Plain list-form depends_on waits for the container to START; OpenSearch
+    # takes tens of seconds more to become READY, and restart: always retried
+    # until it worked -- which is why Phase 1 acceptance passed over this.
     depends_on:
-      - opensearch
-      - postgres
-      - redis
+      opensearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   timesketch-worker:
     image: ${timesketch_image}
@@ -76,7 +108,14 @@ services:
       # omitting it crash-loops the web container. On the data volume so the
       # record survives dormancy.
       - /mnt/data/logs:/var/log/timesketch
+    # Upstream gates on readiness and our derived file did not (spec A2).
+    # Plain list-form depends_on waits for the container to START; OpenSearch
+    # takes tens of seconds more to become READY, and restart: always retried
+    # until it worked -- which is why Phase 1 acceptance passed over this.
     depends_on:
-      - opensearch
-      - postgres
-      - redis
+      opensearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

@@ -374,3 +374,65 @@ run "ssm_agent_recovers_on_every_reactivation" {
     error_message = "The unit must be enabled so it runs on stop/start, not just on first boot."
   }
 }
+
+# The defect NEXT.md carried from Phase 1 acceptance.
+#
+# Upstream gives the three backing services healthchecks and has web and worker
+# wait on condition: service_healthy. Our derived file dropped that for plain
+# list-form depends_on, so Timesketch starts when OpenSearch STARTS rather than
+# when it is READY -- and restart: always masks it, which is why Phase 1
+# acceptance passed over it.
+#
+# These assert the compose TEXT. Whether the restart loop is actually gone can
+# only be seen in `docker compose logs` after a real activation; see
+# docs/acceptance/phase-3.md check 5.
+run "backing_services_gate_on_readiness" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = length(regexall("condition: service_healthy", local.docker_compose)) == 6
+    error_message = "Both timesketch-web and timesketch-worker must gate on all three backing services, or one of them races OpenSearch to readiness."
+  }
+
+  assert {
+    condition     = length(regexall("healthcheck:", local.docker_compose)) == 3
+    error_message = "opensearch, postgres and redis each need a healthcheck; a service_healthy dependency on a service with no healthcheck is a compose error, not a no-op."
+  }
+}
+
+# The worker imports over the REST API, so the web container can no longer bind
+# loopback alone. D6 forbids PUBLIC ingress and this stays private -- no public
+# IP, no internet gateway, and a security group naming exactly two sources.
+run "timesketch_is_reachable_from_the_worker" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = !strcontains(local.docker_compose, "127.0.0.1:5000:5000")
+    error_message = "A loopback-only bind leaves the Batch worker with no way to import the .plaso it just produced."
+  }
+
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.appliance_from_worker.from_port == 5000
+    error_message = "Reachability is granted by security group, not by bind address; without this rule the port is open on the host and closed at the edge."
+  }
+}
+
+# The pipeline account, created the same idempotent way as the responders and
+# with the same set +x discipline -- cloud-init runs with set -x and its log is
+# readable by anyone who can reach the instance.
+run "pipeline_account_password_does_not_reach_the_cloud_init_log" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(aws_instance.appliance.user_data, "${var.name_prefix}/pipeline")
+    error_message = "The worker authenticates as a named pipeline account; cloud-init must create it."
+  }
+
+  assert {
+    condition     = length(regexall("set \\+x", aws_instance.appliance.user_data)) >= 2
+    error_message = "Every secret fetch must be wrapped in set +x. Responder passwords leaked into cloud-init-output.log until that was added; the pipeline password would too."
+  }
+}

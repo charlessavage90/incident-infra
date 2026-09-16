@@ -46,9 +46,14 @@ locals {
   pipeline_user = "pipeline"
 
   timesketch_conf = templatefile("${path.module}/templates/timesketch.conf.tftpl", {
-    secret_key               = random_password.timesketch_secret_key.result
-    postgres_password        = random_password.postgres.result
-    local_auth_allowed_users = join(", ", [for u in var.responders : "'${u}'"])
+    secret_key        = random_password.timesketch_secret_key.result
+    postgres_password = random_password.postgres.result
+    # LOCAL_AUTH_ALLOWED_USERS keeps named local accounts working even when
+    # OIDC is enabled -- it is the break-glass hook if federated ingress is ever
+    # added (spec 3.5). The pipeline account belongs in it for exactly that
+    # reason: an auth change that locked it out would stop every timeline
+    # silently, with the artifacts still arriving and still being recorded.
+    local_auth_allowed_users = join(", ", [for u in concat(var.responders, [local.pipeline_user]) : "'${u}'"])
   })
 
   docker_compose = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
@@ -96,6 +101,7 @@ resource "aws_instance" "appliance" {
     timesketch_conf               = local.timesketch_conf
     docker_compose                = local.docker_compose
     responders                    = var.responders
+    pipeline_user                 = local.pipeline_user
     name_prefix                   = var.name_prefix
   })
 
