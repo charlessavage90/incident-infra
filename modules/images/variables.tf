@@ -9,10 +9,10 @@ variable "ecr_repository_urls" {
 
   validation {
     condition = alltrue([
-      for k in ["timesketch", "opensearch", "postgres", "redis", "nginx"] :
+      for k in ["timesketch", "opensearch", "postgres", "redis", "nginx", "plaso-worker"] :
       contains(keys(var.ecr_repository_urls), k)
     ])
-    error_message = "ecr_repository_urls must contain timesketch, opensearch, postgres, redis, and nginx."
+    error_message = "ecr_repository_urls must contain timesketch, opensearch, postgres, redis, nginx, and plaso-worker."
   }
 }
 

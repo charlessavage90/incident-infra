@@ -65,8 +65,15 @@ output "appliance_instance_profile_name" {
   description = "Instance profile granting SSM, ECR pull, and secret read."
 }
 
+# The worker repository is in this map although it is built rather than
+# mirrored: modules/images needs its URL to push to, and the example
+# environment passes this map wholesale. Leaving it out fails the images
+# module's variable validation at apply rather than here.
 output "ecr_repository_urls" {
-  value       = { for k, r in aws_ecr_repository.mirror : k => r.repository_url }
+  value = merge(
+    { for k, r in aws_ecr_repository.mirror : k => r.repository_url },
+    { "plaso-worker" = aws_ecr_repository.worker.repository_url },
+  )
   description = "Map of image name to ECR repository URL."
 }
 
@@ -136,11 +143,6 @@ output "retention_years" {
 }
 
 # --- Phase 3: what the pipeline layer consumes ---
-
-output "plaso_worker_repository_url" {
-  value       = aws_ecr_repository.worker.repository_url
-  description = "ECR repository for the built plaso worker image."
-}
 
 output "evidence_bucket_arn" {
   value       = aws_s3_bucket.evidence.arn
