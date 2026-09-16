@@ -22,7 +22,8 @@ changing anything structural:
   call, and no `prevent_destroy` on the evidence buckets
 - `docs/acceptance/phase-1.md` — the acceptance gate, plus a table of the six defects the first
   real run exposed
-- `docs/acceptance/phase-2.md` — the Phase 2 gate. **Not yet run.**
+- `docs/acceptance/phase-2.md` — the Phase 2 gate, plus a table of the three defects its first
+  real run exposed
 
 Phases 1 and 2 are complete and acceptance-passed against a real AWS account. Phases 3–4 (ingest
 pipeline, lifecycle) are specified but not built.
@@ -297,9 +298,12 @@ principal. Two of them need naming explicitly, and each was discovered by an app
 
 **Neither error names the key** — CloudTrail's names the trail, CloudWatch Logs' names the log
 group ARN. Any future CMK-encrypted resource owned by a service rather than by an account
-principal will need the same treatment, and will fail the same uninformative way. But an explicit key policy that omits
+principal will need the same treatment, and will fail the same uninformative way.
+
+**The root statement is the one that cannot be dropped.** An explicit key policy that omits
 `EnableRootAccountAccess` **cannot be edited by anyone**, and the key becomes unusable and
-undeletable except by scheduling deletion. Do not tidy it away. A test asserts both statements.
+undeletable except by scheduling deletion. Do not tidy it away. A test asserts all three
+statements.
 
 ### `modules/analysis/templates/cloud-init.sh.tftpl`
 
