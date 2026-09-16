@@ -12,9 +12,10 @@ Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this f
 Phases 1 and 2 are built and acceptance-passed against a real AWS account. Phases 3–4 are
 specified in the design but not started.
 
-PRs #1–#4 are merged. **PR #5 is open** — the three defects the Phase 2 acceptance run found,
-each with a regression test. It is a draft until someone reviews it; the fixes are already applied
-to the development account, because the run could not continue without them.
+PRs #1–#5 are all merged and their branches deleted. **`main` matches what is deployed**: PR #5
+carried the three defects the Phase 2 acceptance run found, each with a regression test, and those
+fixes were already applied to the development account because the run could not continue without
+them. There is no open branch and nothing is waiting on the previous session.
 
 **The live development environment is DORMANT and Phase 2 now exists in it.** The appliance was
 never woken for this run — none of the 16 checks needed it. What persists:
@@ -50,7 +51,7 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Immediate items
 
-**1. DEFECT — our compose file dropped upstream's healthcheck gating.** Unchanged from the last
+**DEFECT — our compose file dropped upstream's healthcheck gating.** Unchanged from the last
 hand-off, and now the only open defect. It is in `modules/analysis`, which both Phase 2 and its
 acceptance run were scoped to leave alone.
 
@@ -71,10 +72,6 @@ environment — hence the owner's call on when, not whether.
 
 **Read the compose-pin trap in `CLAUDE.md` before touching that file.** Re-syncing toward upstream
 is safe; bumping the Compose pin is safe; doing both is not, and neither looks dangerous alone.
-
-**2. Review and merge PR #5.** Three fixes, three regression tests, already applied to the
-development account. Nothing is blocked on it, but `main` does not currently contain code that
-the deployed environment is running.
 
 ---
 
