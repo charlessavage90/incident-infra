@@ -20,23 +20,31 @@ changing anything structural:
 - `docs/superpowers/plans/2026-09-14-phase-2-evidence-store.md` — Phase 2 implementation, and the
   place three decisions the spec left open are argued: write-before-copy, the separate legal-hold
   call, and no `prevent_destroy` on the evidence buckets
+- `docs/superpowers/plans/2026-09-16-phase-3-ingest-pipeline.md` — Phase 3 implementation, and
+  where the four decisions the spec left open are argued: D14's re-examination, §5.5's
+  self-contradiction, which bucket the pipeline triggers from, and how the worker reaches
+  Timesketch
 - `docs/acceptance/phase-1.md` — the acceptance gate, plus a table of the six defects the first
   real run exposed
 - `docs/acceptance/phase-2.md` — the Phase 2 gate, plus a table of the three defects its first
   real run exposed
+- `docs/acceptance/phase-3.md` — the Phase 3 gate. **Written, not yet run.**
 
-Phases 1 and 2 are complete and acceptance-passed against a real AWS account. Phases 3–4 (ingest
-pipeline, lifecycle) are specified but not built.
+Phases 1 and 2 are complete and acceptance-passed against a real AWS account. **Phase 3 is built
+but has not had its acceptance run** — CI-green is not the same claim. Phase 4 (lifecycle) is
+specified but not built.
 
 **Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
 Phase 1's acceptance run found six defects in code that looked finished; Phase 2's found three,
 all of them authorisation failures that `mock_provider` cannot see. Assume the next phase behaves
 the same way.
 
-The design document carries an **§12 Amendments** table. Eight corrections have been made in place
-rather than in a parallel errata file; read §12 before trusting a remembered reading of that
-document. A1, A3, A4, A7 and A8 changed load-bearing behaviour; A2 records a code defect that is
-still open and tracked in `NEXT.md`.
+The design document carries an **§12 Amendments** table. Twelve corrections have been made in
+place rather than in a parallel errata file; read §12 before trusting a remembered reading of that
+document. A1, A3, A4, A7, A8, A10, A11 and A12 changed load-bearing behaviour. A2's open half —
+the dropped compose healthchecks — is now fixed. A9 replaces D14's *reasoning* without changing its
+conclusion, and A10 **withdraws** something §5.5 previously promised, so a remembered reading of
+either is likely to be wrong.
 
 ## Commands
 
@@ -74,30 +82,37 @@ cd modules/platform && tofu test -filter=tests/network.tftest.hcl      # Linux/m
 `Success! 0 passed, 0 failed` — it does not error. Always check the count, or you will believe
 tests ran when none did.
 
-**Python.** The repo has two Python trees since Phase 2 — `cli/` (`irctl`) and
-`modules/platform/lambda/intake/` (the recorder). They are separate suites with separate CI
-jobs and separate working directories; there is no single command that runs both.
+**Python.** The repo has four Python trees since Phase 3 — `cli/` (`irctl`),
+`modules/platform/lambda/intake/` (the recorder), `modules/analysis/lambda/pipeline/` (claim and
+reconcile) and `containers/plaso-worker/` (the worker). They are separate suites with separate CI
+jobs and separate working directories; there is no single command that runs them all.
 
 ```bash
 python -m venv .venv                                  # .venv/ is gitignored
 ./.venv/Scripts/python.exe -m pip install -e "cli[dev]"
 ./.venv/Scripts/python.exe -m pip install boto3 pytest
 
-cd cli && python -m pytest tests -v                                  # irctl, 16 tests
-cd modules/platform/lambda/intake && python -m pytest test_handler.py -v   # recorder, 7 tests
+cd cli && python -m pytest tests -v                                     # irctl, 16
+cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
+cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
+cd containers/plaso-worker && python -m pytest -v                       # worker, 23
 ```
 
-**No test anywhere touches AWS.** The HCL uses `mock_provider`; `irctl` uses
-`botocore.Stubber`; the recorder's tests are pure functions. No credentials, no network, no
-cost. Current counts — **check them, a filter that matches nothing still reports success**:
+The worker suite needs `requests` as well as `boto3` and `pytest`; see
+`containers/plaso-worker/requirements-dev.txt`.
+
+**No test anywhere touches AWS.** The HCL uses `mock_provider`; every Python suite uses
+`botocore.Stubber` or an injected fake. No credentials, no network, no cost. Current counts — **check them, a filter that matches nothing still reports success**:
 
 | Suite | Count |
 |---|---|
-| `modules/platform` | 48 run blocks |
-| `modules/images` | 7 |
-| `modules/analysis` | 26 |
+| `modules/platform` | 51 run blocks |
+| `modules/images` | 9 |
+| `modules/analysis` | 42 |
 | `cli` | 16 tests |
-| `modules/platform/lambda/intake` | 7 tests |
+| `modules/platform/lambda/intake` | 8 tests |
+| `modules/analysis/lambda/pipeline` | 20 tests |
+| `containers/plaso-worker` | 23 tests |
 
 **Posture toggle** (applies real infrastructure, costs money):
 
@@ -114,7 +129,7 @@ Three modules with independent state. The split is the design, not organisation.
 | Module | Lifetime | Holds |
 |---|---|---|
 | `modules/platform/` | **Permanent** | VPC, KMS, ECR, IAM, private DNS, budget alarm, tooling bucket, **the EBS data volume**, and the whole **evidence store** — four buckets, both manifest tables, the intake recorder, CloudTrail |
-| `modules/analysis/` | **Toggleable** | Appliance, VPC interface endpoints, secrets — driven by `var.posture` |
+| `modules/analysis/` | **Toggleable** | Appliance, VPC interface endpoints, secrets, **the plaso Batch fleet, the Step Functions pipeline and both its triggers** — driven by `var.posture` |
 | `modules/images/` | Independent | CodeBuild mirror; runs outside the VPC, unaffected by dormancy |
 
 **The EBS data volume lives in `platform/`, not `analysis/`.** That is load-bearing: `tofu destroy`
@@ -199,8 +214,17 @@ catches is no longer transfer corruption — that never reaches storage. It is a
 transferred perfectly and was filed against the wrong case, which under per-case COMPLIANCE mode
 nobody can undo.
 
-**Known ceiling:** the copy is driven by a Lambda under a 900-second timeout. Phase 3 moves it into
-Batch. It fails loudly and the object stays in intake.
+**Known ceiling:** the copy is driven by a Lambda under a 900-second timeout. It fails loudly and
+the object stays in intake.
+
+**Phase 3 was supposed to move that copy into Batch and does not (amendment A10), because doing so
+would break the property §5.5 exists to provide.** Batch is posture-gated — the compute environment
+is `DISABLED` when dormant — so an artifact arriving between incidents would sit in intake with a
+7-day expiry and no legal hold, its manifest row stuck at `recording`, until someone woke the
+environment. The ceiling is raised in place instead: a tuned `TransferConfig` in `handler.py` **and**
+2 GB of function memory, because Lambda scales network bandwidth with memory and neither change
+does anything without the other. The real ceiling is a measurement, not a number to write down —
+`docs/acceptance/phase-3.md` check 9 takes it.
 
 **`irctl` is configured entirely from environment variables** so it holds no state:
 `IR_INTAKE_BUCKET`, `IR_CASES_TABLE`, `IR_RETENTION_YEARS` — each a `tofu output` from
@@ -305,6 +329,71 @@ principal will need the same treatment, and will fail the same uninformative way
 undeletable except by scheduling deletion. Do not tidy it away. A test asserts all three
 statements.
 
+### The ingest pipeline (Phase 3)
+
+**There are two triggers and the second one is not redundant.** An EventBridge rule on the
+*evidence* bucket starts the state machine within seconds; a scheduled reconciler (`sweep`) scans
+the manifest every `sweep_interval_minutes` while active. Deleting the rule would cost latency.
+Deleting the sweep would silently strand **every artifact that arrived while the environment was
+dormant** — their S3 events fired when the rule was `DISABLED` and those events are gone. That is
+most artifacts, because accumulating them between incidents is what an evidence store is for.
+
+**The trigger hangs off evidence, not intake (A11).** §4.1's original diagram fanned out from
+intake, which cannot work now the recorder clears the intake object on success: the pipeline would
+race a `DeleteObject` and read a bucket whose contents expire in `intake_expiry_days`.
+
+**The event pattern deliberately does not filter on `detail.reason`.** The recorder's server-side
+copy is a `CopyObject` below 5 GB and a `CompleteMultipartUpload` above it, so a reason filter
+would silently skip exactly the large artifacts.
+
+**Both triggers converge on one conditional DynamoDB write**, `recorded → timelining`, in the claim
+Lambda. Deduplication is that write failing, not a check before it — the same argument, and
+deliberately the same shape, as the recorder's `_claim`. A stale `timelining` row becomes
+re-claimable after `STALE_CLAIM_HOURS`, which **must stay at or above the Batch job definition's
+`attempt_duration_seconds`**; below it, the sweep would re-drive work still in flight and produce a
+duplicate timeline.
+
+**`batch:submitJob.sync` needs `events:PutRule`.** Step Functions implements the `.sync` wait by
+creating a managed EventBridge rule (`StepFunctionsGetEventsForBatchJobsRule`). Without
+`events:PutRule`, `PutTargets` and `DescribeRule` every execution fails at the first Batch state
+with an error naming **EventBridge**, which is not where anyone looks.
+
+**The Batch launch template's user data must be MIME multipart.** Batch *appends* its `ECS_CLUSTER`
+configuration to whatever the template supplies, and can only do that to an archive. A plain shell
+script is replaced rather than merged, and the symptom is silence: instances launch, look healthy,
+never join the cluster, and every job sits in `RUNNABLE` with no error in Batch, in ECS, or on the
+instance. Missing `ecs` / `ecs-agent` / `ecs-telemetry` endpoints produce the identical symptom, so
+check both.
+
+**The worker image is tagged by its base digest, not by `timesketch_version`.** The mirror's
+idempotency rule is "tag exists, skip", and a version-tagged worker would let that rule hide a
+stale base — the exact mechanism that left `postgres:13.0-alpine` in the development account after
+the pin moved. A new base is always a new tag, so the skip stays honest.
+
+**The worker is the evidence store's second reader, and A7's asymmetry does not protect it
+(A12).** That asymmetry is a property of the *recorder*, not of the bucket. The worker's job role
+holds `s3:GetObject` on evidence, no delete of any kind, and no legal hold — and a test asserts
+the absence of both by **action**, because `mock_resource` gives all four buckets one ARN and any
+assertion about which bucket a policy names passes vacuously.
+
+**Neither pipeline Lambda touches S3 at all.** The claim step resolves a missing digest by querying
+the manifest rather than by `HeadObject`, specifically so `s3:GetObject` on evidence stays confined
+to the worker. Adding it to the claim role would be the easy, wrong fix for a lookup failure.
+
+**Keys arrive URL-encoded from EventBridge and raw from the sweep.** They are passed under
+different field names (`evidence_key_encoded` versus `evidence_key`) rather than sniffed apart:
+decoding a raw key would corrupt any containing a literal `+` or `%`.
+
+**The Batch job queue stays `ENABLED` while dormant; only the compute environment is `DISABLED`.**
+A job submitted against a disabled environment waits. A job submitted against a disabled queue is
+rejected outright, and a rejected job is an artifact that never gets timelined.
+
+**Timesketch's web container binds all interfaces, not loopback.** That is not a D6 violation: D6
+forbids *public* ingress, and there is no public IP, no internet gateway, and a security group
+admitting exactly two sources. The bind is not the control; the security group is. The worker
+authenticates as a dedicated `pipeline` local account — Timesketch has no AWS IAM integration, so
+it must present a password like any other client.
+
 ### `modules/analysis/templates/cloud-init.sh.tftpl`
 
 Four guards, each of which caused a real failure. It runs on every boot of a *replaced* instance,
@@ -389,10 +478,12 @@ All verified against upstream sources during design; each shaped a decision.
   rather than of the module.
 - OpenTofu 1.12 has **no** `source` argument on `mock_provider`, so the mock block is duplicated
   across each module's test files. **Run `python scripts/sync-test-mocks.py` rather than editing
-  one file.** Keeping them in sync by hand is what failed: adding the intake Lambda broke seven
-  runs in files nobody had touched, because only the new test file mocked `aws_iam_role` and the
+  one file.** Keeping them in sync by hand is what failed, twice: adding the intake Lambda broke
+  seven runs in `modules/platform` files nobody had touched, and the Phase 3 Batch fleet did the
+  same in `modules/analysis`. Both times only the new test file mocked `aws_iam_role`, and the
   provider validates role ARNs. The error names the ARN, never the missing mock. The script
-  regenerates every platform test file's preamble from one canonical block.
+  regenerates **both modules'** preambles, each from its own canonical block — their needs differ,
+  but within a module they must not.
 - Mocks must supply anything the provider *validates* and anything returned as a *list*. Known
   necessities: `aws_availability_zones.names` (empty otherwise), and ARNs for `aws_kms_key`,
   `aws_ecr_repository`, `aws_iam_role`; plus `aws_subnet.availability_zone`, `aws_ami.id`,
@@ -501,13 +592,30 @@ Every one of these cost real time.
 
 ## Snyk
 
-Run `snyk_iac_scan` on `modules/platform` and `snyk_code_scan` on `cli` and
-`modules/platform/lambda` after touching either.
+Run `snyk_iac_scan` on `modules/platform` **and `modules/analysis`**, and `snyk_code_scan` on
+`cli`, `modules/platform/lambda`, `modules/analysis/lambda` and `containers/plaso-worker`, after
+touching any of them.
 
 **Nothing above low severity, and 0 Snyk Code findings.** The low count moves whenever a resource
 is added — it was 13, then 14 when the Lambda arrived, then 13 again once X-Ray tracing was
 enabled — so **re-run the scan rather than trusting a number written here or in a commit
-message.** The lows are accepted and **left visible rather than suppressed**, with reasoning
+message.**
+
+**Scanning a module directory does not pick up the repository-root `.snyk`**, so
+`SNYK-CC-AWS-426` shows as an unignored low against `modules/analysis`. That is the suppression
+working, not a regression.
+
+Phase 3 raised two findings and both were real:
+
+- **A medium on the new DynamoDB gateway endpoint** (`SNYK-CC-AWS-428`, no endpoint policy). The
+  first draft omitted it, arguing nothing writes evidence to DynamoDB so there was nothing to
+  exfiltrate. That misses the direction of the threat — without the account condition a compromised
+  worker could reach a table in an *attacker's* account. Fixed, not suppressed.
+- **A path traversal in the worker** (`CWE-23`). `os.path.basename("CASE-1/..")` is `".."`, which
+  lands a download one level above the scratch directory. `safe_local_path` resolves and bounds it.
+
+X-Ray is enabled on the two pipeline Lambdas for the same reason as the recorder's: a failure that
+spans Lambda, Batch and DynamoDB is not diagnosable from one service's log lines. The lows are accepted and **left visible rather than suppressed**, with reasoning
 grouped by rule in the headers of `evidence.tf`, `audit.tf` and `storage.tf`. Three are not
 weaknesses the scanner can see through:
 

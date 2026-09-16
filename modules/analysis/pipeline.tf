@@ -91,6 +91,13 @@ resource "aws_iam_role_policy" "claim" {
         Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
         Resource = var.kms_key_arn
       },
+      {
+        # X-Ray segment upload cannot be resource-scoped.
+        Sid      = "XRayTracing"
+        Effect   = "Allow"
+        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+        Resource = "*"
+      },
     ]
   })
 }
@@ -142,6 +149,13 @@ resource "aws_iam_role_policy" "sweep" {
         Action   = ["kms:Decrypt"]
         Resource = var.kms_key_arn
       },
+      {
+        # X-Ray segment upload cannot be resource-scoped.
+        Sid      = "XRayTracing"
+        Effect   = "Allow"
+        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+        Resource = "*"
+      },
     ]
   })
 }
@@ -157,6 +171,14 @@ resource "aws_lambda_function" "claim" {
 
   timeout     = 30
   memory_size = 256
+
+  # The pipeline's failure modes span Lambda, Batch and DynamoDB, and a
+  # CloudWatch log line from one of them does not say which leg failed. Same
+  # argument as the intake recorder's, and the same pennies at this invocation
+  # rate.
+  tracing_config {
+    mode = "Active"
+  }
 
   environment {
     variables = {
@@ -181,6 +203,14 @@ resource "aws_lambda_function" "sweep" {
   # ever does.
   timeout     = 300
   memory_size = 256
+
+  # The pipeline's failure modes span Lambda, Batch and DynamoDB, and a
+  # CloudWatch log line from one of them does not say which leg failed. Same
+  # argument as the intake recorder's, and the same pennies at this invocation
+  # rate.
+  tracing_config {
+    mode = "Active"
+  }
 
   environment {
     variables = {

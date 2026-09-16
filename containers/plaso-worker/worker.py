@@ -77,6 +77,26 @@ def timeline_name(evidence_key):
     return os.path.splitext(os.path.basename(evidence_key))[0]
 
 
+def safe_local_path(directory, key):
+    """Resolve a download destination inside `directory`, and never outside it.
+
+    os.path.basename alone is not enough: basename("CASE-1/..") is "..", so a
+    key crafted to end in a traversal component would land the download one
+    level above the scratch directory. The key reaches here from object
+    metadata written at collection time, which is exactly the kind of input
+    that should not be trusted to be well formed.
+    """
+    name = os.path.basename(key.rstrip("/"))
+    if not name or name in (".", ".."):
+        raise WorkerError(f"{key!r} has no usable filename; refusing to download it")
+
+    root = os.path.realpath(directory)
+    dest = os.path.realpath(os.path.join(root, name))
+    if os.path.commonpath([root, dest]) != root:
+        raise WorkerError(f"{key!r} resolves outside the scratch directory")
+    return dest
+
+
 def download(bucket, key, dest):
     body = _client("s3").get_object(Bucket=bucket, Key=key)["Body"]
     with open(dest, "wb") as handle:
@@ -143,7 +163,7 @@ def cmd_timeline(args):
         source = download(
             _config("EVIDENCE_BUCKET"),
             args.evidence_key,
-            os.path.join(workdir, os.path.basename(args.evidence_key)),
+            safe_local_path(workdir, args.evidence_key),
         )
         output = os.path.join(workdir, f"{args.sha256}.plaso")
         run_log2timeline(source, output)
@@ -157,7 +177,7 @@ def cmd_import(args):
     scratch = _config("SCRATCH_DIR")
 
     with tempfile.TemporaryDirectory(dir=scratch) as workdir:
-        local = download(bucket, args.key, os.path.join(workdir, os.path.basename(args.key)))
+        local = download(bucket, args.key, safe_local_path(workdir, args.key))
         client = _timesketch()
         sketch_id = client.resolve_sketch(args.case_id)
         timeline_id = client.upload(local, sketch_id, timeline_name(args.key))

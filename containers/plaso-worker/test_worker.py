@@ -138,3 +138,26 @@ def test_main_returns_nonzero_rather_than_raising(monkeypatch):
     )
 
     assert code == 1
+
+
+def test_safe_local_path_keeps_the_download_inside_the_scratch_directory(tmp_path):
+    dest = worker.safe_local_path(str(tmp_path), "CASE-1/triage.zip")
+    assert dest == str(tmp_path / "triage.zip")
+
+
+def test_a_trailing_slash_is_odd_but_not_dangerous(tmp_path):
+    """A key ending in "/" is a directory marker rather than an artifact. It
+    lands as an ordinarily-named file inside scratch, which is pointless but
+    safe -- so it is not refused here. The recorder is what stops a directory
+    marker acquiring a manifest row in the first place."""
+    assert worker.safe_local_path(str(tmp_path), "CASE-1/") == str(tmp_path / "CASE-1")
+
+
+@pytest.mark.parametrize("key", ["CASE-1/..", "CASE-1/.", "..", "."])
+def test_a_key_that_resolves_outside_the_scratch_directory_is_refused(tmp_path, key):
+    """os.path.basename alone is not enough: basename("CASE-1/..") is "..",
+    which lands the download one level above the scratch directory. The key
+    comes from object metadata written at collection time and is not trusted to
+    be well formed."""
+    with pytest.raises(worker.WorkerError):
+        worker.safe_local_path(str(tmp_path), key)

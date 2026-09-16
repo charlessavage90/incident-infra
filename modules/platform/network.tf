@@ -113,15 +113,38 @@ resource "aws_route" "private_egress" {
 # Batch worker updates the artifact manifest from inside the VPC, and a control
 # path that dormancy can destroy has no business in the chain of custody.
 #
-# No policy. Unlike S3, nothing in this design writes evidence to DynamoDB, so
-# there is no cross-account exfiltration path to close here -- and an endpoint
-# policy scoped to this account's tables would have to be kept in step with
-# every table Phase 4 adds.
+# The account condition is the same one the S3 endpoint carries, and for the
+# same reason. An earlier draft omitted it on the argument that nothing writes
+# evidence to DynamoDB so there is nothing to exfiltrate. That misses the
+# direction of the threat: without the condition, a compromised worker could use
+# this endpoint to reach a table in an ATTACKER's account -- to stage
+# exfiltrated metadata, or to take instructions. D2 isolates this account from
+# the environment under investigation, and an endpoint open to every account
+# undercuts that whichever way the bytes flow.
+#
+# Scoped by principal rather than by resource: a table-scoped policy would have
+# to be kept in step with every table Phase 4 adds, and forgetting one fails
+# closed but silently.
 resource "aws_vpc_endpoint" "dynamodb" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${data.aws_region.current.region}.dynamodb"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private.id]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "*"
+      Resource  = "*"
+      Condition = {
+        StringEquals = {
+          "aws:PrincipalAccount" = data.aws_caller_identity.current.account_id
+        }
+      }
+    }]
+  })
 
   tags = merge(local.common_tags, { Name = "${var.name_prefix}-dynamodb" })
 }
