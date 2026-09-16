@@ -187,3 +187,21 @@ variable "worker_root_volume_gb" {
   description = "Root volume for worker instances. Scratch is instance store; this is the OS and image layers only."
   default     = 100
 }
+
+variable "pipeline_notification_emails" {
+  type        = list(string)
+  description = "Addresses notified when an artifact is timelined, flagged for triage, or fails."
+  default     = []
+}
+
+variable "sweep_interval_minutes" {
+  type        = number
+  description = <<-EOT
+    How often the reconciler looks for recorded artifacts with no timeline.
+
+    This is the correctness path, not a fallback: an artifact recorded while the
+    environment was dormant produced its S3 event while the EventBridge rule was
+    DISABLED, and nothing else will ever timeline it.
+  EOT
+  default     = 15
+}

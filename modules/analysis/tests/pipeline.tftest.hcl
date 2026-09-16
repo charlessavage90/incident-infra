@@ -257,3 +257,102 @@ run "launch_template_user_data_is_mime_multipart" {
     error_message = "Batch cannot append its ECS_CLUSTER config to a plain shell script; the instances would never join the compute environment."
   }
 }
+
+# Spec 3.2's "ingest pipeline trigger", and A4's insistence that it is one of
+# TWO triggers. Intake recording is never gated; this is.
+run "dormant_disables_both_pipeline_triggers" {
+  command = plan
+  variables { posture = "dormant" }
+
+  assert {
+    condition     = aws_cloudwatch_event_rule.evidence_created.state == "DISABLED"
+    error_message = "A dormant environment must not start executions it cannot run: the Batch fleet is DISABLED and the appliance is stopped."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_event_rule.sweep.state == "DISABLED"
+    error_message = "The sweep would start an execution per recorded artifact every fifteen minutes against a fleet that cannot run them."
+  }
+}
+
+# The whole point of the sweep existing.
+run "active_enables_the_reconciler_that_drains_the_dormant_backlog" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = aws_cloudwatch_event_rule.sweep.state == "ENABLED"
+    error_message = "An artifact recorded while dormant generated its S3 event while the rule was DISABLED. That event is gone; only the sweep will ever timeline it."
+  }
+}
+
+# The event pattern deliberately does NOT filter on detail.reason.
+#
+# The recorder's server-side copy is a CopyObject below 5 GB and a
+# CompleteMultipartUpload above it, so a reason filter would silently skip
+# exactly the large artifacts that most need timelining.
+run "trigger_matches_every_way_the_recorder_writes" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = !strcontains(aws_cloudwatch_event_rule.evidence_created.event_pattern, "reason")
+    error_message = "Filtering on detail.reason drops artifacts over 5 GB, which arrive as CompleteMultipartUpload rather than CopyObject."
+  }
+}
+
+# batch:submitJob.sync is not a plain SubmitJob.
+#
+# Step Functions implements the .sync wait by creating a MANAGED EventBridge
+# rule, so the state machine role needs events:PutRule / PutTargets /
+# DescribeRule as well as the Batch actions. Without them every execution fails
+# at the first Batch state with an error naming EventBridge, not Batch -- the
+# same class of authorisation failure that produced all three Phase 2
+# acceptance defects. Only a real execution proves the grant is sufficient;
+# this asserts it is present.
+run "state_machine_can_run_the_sync_pattern" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition = length(flatten([
+      for s in jsondecode(aws_iam_role_policy.state_machine.policy).Statement :
+      [for a in s.Action : a if a == "events:PutRule"]
+    ])) == 1
+    error_message = "batch:submitJob.sync creates a managed EventBridge rule; without events:PutRule every execution fails at the first Batch state."
+  }
+}
+
+# Spec 4.3: plaso returning zero events falls back and flags for a responder.
+run "zero_events_is_flagged_not_silently_recorded" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(aws_sfn_state_machine.pipeline.definition, "needs_triage")
+    error_message = "An artifact plaso found nothing in must reach a human, not sit in the manifest looking finished."
+  }
+}
+
+# The claim function must not be able to start executions, and the sweep must
+# not be able to read evidence. Neither touches S3 at all.
+run "neither_pipeline_function_can_reach_the_evidence_store" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition = length(flatten([
+      for s in jsondecode(aws_iam_role_policy.claim.policy).Statement :
+      [for a in s.Action : a if startswith(a, "s3:")]
+    ])) == 0
+    error_message = "The claim step resolves a digest from the manifest precisely so it never needs s3:GetObject on evidence (amendment A12)."
+  }
+
+  assert {
+    condition = length(flatten([
+      for s in jsondecode(aws_iam_role_policy.sweep.policy).Statement :
+      [for a in s.Action : a if startswith(a, "s3:")]
+    ])) == 0
+    error_message = "The sweep reads the manifest and starts executions. It has no business in the evidence store."
+  }
+}
