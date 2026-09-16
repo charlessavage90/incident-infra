@@ -1,4 +1,15 @@
 mock_provider "aws" {
+  # mock_provider invents values for computed attributes, but the AWS provider
+  # VALIDATES some of them -- ARNs especially -- and rejects the invented ones.
+  # Anything returned as a list must be mocked too, or it arrives empty.
+  #
+  # OpenTofu 1.12 has no `source` argument on mock_provider, so this block is
+  # duplicated across every test file in this module. IT MUST BE KEPT IN SYNC:
+  # a resource mocked in one file and not another fails only in the OTHER files,
+  # with an error that names the ARN rather than the missing mock.
+  #
+  # Regenerate all of them rather than editing one:
+  #   python scripts/sync-test-mocks.py
   mock_data "aws_region" {
     defaults = {
       region = "us-east-1"
@@ -34,8 +45,76 @@ mock_provider "aws" {
       arn = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
     }
   }
+
+  # From Phase 3. The Batch compute environment validates both of these as ARNs
+  # before it will plan, and neither is something this module can invent.
+  mock_resource "aws_iam_role" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:role/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_iam_instance_profile" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:instance-profile/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_secretsmanager_secret" {
+    defaults = {
+      arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:ir-test-mock"
+    }
+  }
+
+  # The Batch job queue validates the compute environment ARN it is handed, and
+  # the Lambda permission validates the rule ARN. Neither error names the
+  # missing mock -- both print the invented value and "cannot be parsed as an
+  # ARN", which is why these are here rather than discovered one test run at a
+  # time.
+  mock_resource "aws_batch_compute_environment" {
+    defaults = {
+      arn = "arn:aws:batch:us-east-1:111122223333:compute-environment/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_batch_job_queue" {
+    defaults = {
+      arn = "arn:aws:batch:us-east-1:111122223333:job-queue/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_batch_job_definition" {
+    defaults = {
+      arn = "arn:aws:batch:us-east-1:111122223333:job-definition/ir-test-mock:1"
+    }
+  }
+
+  mock_resource "aws_sfn_state_machine" {
+    defaults = {
+      arn = "arn:aws:states:us-east-1:111122223333:stateMachine:ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_sns_topic" {
+    defaults = {
+      arn = "arn:aws:sns:us-east-1:111122223333:ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_lambda_function" {
+    defaults = {
+      arn = "arn:aws:lambda:us-east-1:111122223333:function:ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_cloudwatch_event_rule" {
+    defaults = {
+      arn = "arn:aws:events:us-east-1:111122223333:rule/ir-test-mock"
+    }
+  }
 }
 mock_provider "random" {}
+mock_provider "archive" {}
 
 variables {
   name_prefix                     = "ir-test"
@@ -51,6 +130,13 @@ variables {
   private_zone_name               = "ir.internal"
   image_digest_parameter_prefix   = "/ir-test/images"
   responders                      = ["responder"]
+
+  evidence_bucket     = "ir-test-evidence-111122223333"
+  evidence_bucket_arn = "arn:aws:s3:::ir-test-evidence-111122223333"
+  plaso_bucket        = "ir-test-plaso-111122223333"
+  plaso_bucket_arn    = "arn:aws:s3:::ir-test-plaso-111122223333"
+  artifacts_table     = "ir-test-artifacts"
+  artifacts_table_arn = "arn:aws:dynamodb:us-east-1:111122223333:table/ir-test-artifacts"
 }
 
 run "active_creates_interface_endpoints" {
@@ -61,8 +147,8 @@ run "active_creates_interface_endpoints" {
   }
 
   assert {
-    condition     = length(aws_vpc_endpoint.interface) == 8
-    error_message = "Active posture must create all eight interface endpoints."
+    condition     = length(aws_vpc_endpoint.interface) == 11
+    error_message = "Active posture must create all eleven interface endpoints: eight the appliance needs, plus ecs/ecs-agent/ecs-telemetry without which Batch instances never join the compute environment."
   }
 }
 

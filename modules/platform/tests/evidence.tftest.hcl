@@ -245,3 +245,22 @@ run "evidence_buckets_refuse_delete_markers" {
     error_message = "Denying the versioned delete too would make tofu destroy impossible against a locked bucket."
   }
 }
+
+# The pipeline trigger hangs off EVIDENCE, not intake (amendment A11).
+#
+# The recorder deletes the intake object once it has copied and held it, so an
+# intake-triggered pipeline would race that delete and would read from a bucket
+# with a seven-day expiry. Evidence is the first place the artifact is both
+# immutable and permanent.
+#
+# This asserts the notification is CONFIGURED, not that EventBridge delivers.
+# mock_provider evaluates config, not service behaviour; only an acceptance run
+# can confirm an event actually arrives.
+run "evidence_bucket_publishes_to_eventbridge" {
+  command = plan
+
+  assert {
+    condition     = aws_s3_bucket_notification.evidence.eventbridge == true
+    error_message = "Without this the pipeline has no low-latency trigger and every artifact waits for the reconciler sweep."
+  }
+}

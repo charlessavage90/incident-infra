@@ -65,8 +65,15 @@ output "appliance_instance_profile_name" {
   description = "Instance profile granting SSM, ECR pull, and secret read."
 }
 
+# The worker repository is in this map although it is built rather than
+# mirrored: modules/images needs its URL to push to, and the example
+# environment passes this map wholesale. Leaving it out fails the images
+# module's variable validation at apply rather than here.
 output "ecr_repository_urls" {
-  value       = { for k, r in aws_ecr_repository.mirror : k => r.repository_url }
+  value = merge(
+    { for k, r in aws_ecr_repository.mirror : k => r.repository_url },
+    { "plaso-worker" = aws_ecr_repository.worker.repository_url },
+  )
   description = "Map of image name to ECR repository URL."
 }
 
@@ -133,4 +140,26 @@ output "break_glass_role_arn" {
 output "retention_years" {
   value       = var.retention_years
   description = "Years an artifact is retained after its case closes (D10). Export as IR_RETENTION_YEARS."
+}
+
+# --- Phase 3: what the pipeline layer consumes ---
+
+output "evidence_bucket_arn" {
+  value       = aws_s3_bucket.evidence.arn
+  description = "Evidence bucket ARN. The Batch worker is the first component that legitimately reads it (amendment A12)."
+}
+
+output "plaso_bucket_arn" {
+  value       = aws_s3_bucket.plaso.arn
+  description = "Destination for .plaso files produced by the worker."
+}
+
+output "cases_table_arn" {
+  value       = aws_dynamodb_table.cases.arn
+  description = "Case store ARN."
+}
+
+output "artifacts_table_arn" {
+  value       = aws_dynamodb_table.artifacts.arn
+  description = "Artifact manifest ARN, for the claim step and the worker's finalisation."
 }

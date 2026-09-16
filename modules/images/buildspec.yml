@@ -106,3 +106,65 @@ phases:
           --type String --overwrite --value "$actual"
 
         echo "   docker-compose $DOCKER_COMPOSE_VERSION mirrored"
+      - |
+        set -euo pipefail
+
+        # --- The plaso worker image (spec 4.5) ---
+        #
+        # Built, not mirrored. Its base is the digest resolved for timesketch a
+        # few lines above, in THIS build, which is what makes the parity
+        # invariant structural: the log2timeline.py in the worker is the binary
+        # the appliance's Timesketch reads .plaso files back with.
+        #
+        # Tagged by the BASE digest rather than by TIMESKETCH_VERSION. The
+        # mirror's idempotency rule is "tag exists, skip", and a version-tagged
+        # worker would let that rule hide a stale base -- the same mechanism
+        # that left postgres:13.0-alpine in the development account after the
+        # pin moved. A new base is always a new tag, so the skip stays honest.
+
+        ts_ref=$(aws ssm get-parameter --name "/$NAME_PREFIX/images/timesketch" \
+          --query 'Parameter.Value' --output text)
+        base_digest="${ts_ref##*@}"
+        short="${base_digest#sha256:}"
+        worker_tag="ts-${short:0:12}"
+        worker_repo_name="${ECR_PLASO_WORKER#*/}"
+
+        echo "== worker base is $ts_ref -> tag $worker_tag"
+
+        existing=$(aws ecr describe-images \
+          --repository-name "$worker_repo_name" \
+          --image-ids imageTag="$worker_tag" \
+          --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+
+        if [ -n "$existing" ] && [ "$existing" != "None" ]; then
+          echo "== worker already built against this base, skipping"
+          worker_digest="$existing"
+        else
+          rm -rf /tmp/worker-context
+          mkdir -p /tmp/worker-context
+          aws s3 cp --recursive "s3://$TOOLING_BUCKET/$WORKER_SOURCE_PREFIX/" /tmp/worker-context/
+
+          docker build \
+            --build-arg TIMESKETCH_BASE="$ts_ref" \
+            -t "$ECR_PLASO_WORKER:$worker_tag" \
+            /tmp/worker-context
+
+          docker push "$ECR_PLASO_WORKER:$worker_tag"
+
+          worker_digest=$(aws ecr describe-images \
+            --repository-name "$worker_repo_name" \
+            --image-ids imageTag="$worker_tag" \
+            --query 'imageDetails[0].imageDigest' --output text)
+        fi
+
+        if [ -z "$worker_digest" ] || [ "$worker_digest" = "None" ]; then
+          echo "FATAL: could not resolve a digest for $worker_repo_name:$worker_tag" >&2
+          exit 1
+        fi
+
+        aws ssm put-parameter \
+          --name "/$NAME_PREFIX/images/plaso-worker" \
+          --type String --overwrite \
+          --value "$ECR_PLASO_WORKER@$worker_digest"
+
+        echo "   plaso-worker -> $ECR_PLASO_WORKER@$worker_digest"

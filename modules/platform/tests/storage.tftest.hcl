@@ -140,3 +140,20 @@ run "private_zone_is_attached_to_the_ir_vpc" {
     error_message = "Private zone name must come from var.private_zone_name."
   }
 }
+
+# The worker image is BUILT from the mirrored Timesketch image, not mirrored, so
+# it needs its own repository rather than a sixth entry in local.mirrored_images:
+# a built image wants "keep the last N", where a mirror wants "expire untagged".
+run "worker_repository_is_immutable" {
+  command = plan
+
+  assert {
+    condition     = aws_ecr_repository.worker.image_tag_mutability == "IMMUTABLE"
+    error_message = "A mutable worker tag would let a re-push change what an existing job definition resolves to, which is what spec 4.5 forbids."
+  }
+
+  assert {
+    condition     = aws_ecr_repository.worker.name == "ir-test/plaso-worker"
+    error_message = "The images module and the analysis job definition both address this repository by name."
+  }
+}

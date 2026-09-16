@@ -27,6 +27,8 @@ variables {
     postgres   = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/postgres"
     redis      = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/redis"
     nginx      = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/nginx"
+    # Built, not mirrored -- see modules/platform/ecr.tf.
+    "plaso-worker" = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/plaso-worker"
   }
   kms_key_arn    = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
   tooling_bucket = "ir-test-tooling-111122223333"
@@ -151,5 +153,36 @@ run "mirror_brings_in_docker_compose" {
   assert {
     condition     = strcontains(aws_iam_role_policy.mirror.policy, "ir-test-tooling-111122223333")
     error_message = "The mirror must be able to write to the tooling bucket."
+  }
+}
+
+# The worker's base is a DIGEST resolved in the same build, not a tag.
+#
+# This asserts the SHAPE of the build, which is what is checkable offline: the
+# buildspec passes a build argument rather than hardcoding a FROM. That the
+# resulting image actually carries the same plaso as the appliance can only be
+# confirmed by an acceptance run -- see docs/acceptance/phase-3.md check 3.
+run "worker_image_takes_its_base_as_a_build_argument" {
+  command = plan
+
+  assert {
+    condition     = strcontains(one(aws_codebuild_project.mirror.source).buildspec, "--build-arg TIMESKETCH_BASE=")
+    error_message = "A hardcoded FROM would let the worker's plaso drift from the appliance's, which spec 4.5 exists to prevent."
+  }
+
+  assert {
+    condition     = strcontains(one(aws_codebuild_project.mirror.source).buildspec, "/images/plaso-worker")
+    error_message = "The analysis job definition reads the worker digest from this SSM path; the build must publish it."
+  }
+}
+
+# Uploaded rather than heredoc'd into the buildspec: templatefile() would eat
+# every ${...} in the Python.
+run "worker_sources_are_staged_in_the_tooling_bucket" {
+  command = plan
+
+  assert {
+    condition     = length(aws_s3_object.worker_source) == 3
+    error_message = "The build context needs worker.py, timesketch_client.py and the Dockerfile."
   }
 }

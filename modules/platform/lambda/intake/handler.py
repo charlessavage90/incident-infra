@@ -14,7 +14,16 @@ concession -- a component that cannot read evidence cannot leak it.
 Known ceiling: the copy is driven from here, under a 15-minute function timeout.
 boto3's managed copy uses UploadPartCopy above 5 GB, still server-side, but a
 large enough artifact will exhaust the timeout. It fails loudly and the object
-stays in intake. Phase 3 moves the copy into Batch, which removes the ceiling.
+stays in intake.
+
+Spec 5.5 planned to remove that ceiling in Phase 3 by moving the copy into
+Batch. Amendment A10 withdraws it: Batch is posture-gated, so the move would
+have made RECORDING posture-gated, and an artifact arriving between incidents
+would sit here with a seven-day expiry and no legal hold while its manifest row
+stayed at `recording`. That is exactly the silent gap this module exists to
+prevent, so the fix would have broken the property it was fixing. The ceiling is
+raised in place instead -- see _TRANSFER below and memory_size in intake.tf --
+and measured at acceptance rather than assumed.
 """
 
 import logging
@@ -24,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 log = logging.getLogger()
@@ -40,6 +50,21 @@ log.setLevel(logging.INFO)
 # testability problem, and an import that reaches for ambient configuration is
 # one either way.
 _CLIENTS = {}
+
+# Amendment A10. boto3's defaults are an 8 MB chunk and ten threads, which for a
+# server-side copy is far below what this function's network allowance can
+# drive. The memory bump in intake.tf is the other half of the same change:
+# Lambda scales network bandwidth with memory, so a 256 MB function cannot use
+# these settings however they are tuned. Neither works without the other.
+#
+# The resulting ceiling is a MEASUREMENT, not a number to write down here. See
+# docs/acceptance/phase-3.md check 9.
+_TRANSFER = TransferConfig(
+    multipart_threshold=64 * 1024 * 1024,
+    multipart_chunksize=64 * 1024 * 1024,
+    max_concurrency=20,
+    use_threads=True,
+)
 
 
 def _client(service):
@@ -184,6 +209,7 @@ def _copy_and_hold(bucket, key, meta):
         CopySource={"Bucket": bucket, "Key": key},
         Bucket=_config("EVIDENCE_BUCKET"),
         Key=target,
+        Config=_TRANSFER,
     )
 
     # Spec 5.2: legal hold ON, no retain-until date. The retention clock starts

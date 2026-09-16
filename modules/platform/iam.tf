@@ -52,7 +52,14 @@ resource "aws_iam_role_policy" "appliance" {
           "ecr:BatchGetImage",
           "ecr:GetDownloadUrlForLayer",
         ]
-        Resource = [for r in aws_ecr_repository.mirror : r.arn]
+        # The worker repository is included although the appliance does not run
+        # the worker in normal operation: it is the box an operator uses to
+        # reproduce a timeline by hand, and the omission surfaces as a 403 that
+        # names a layer digest rather than a repository.
+        Resource = concat(
+          [for r in aws_ecr_repository.mirror : r.arn],
+          [aws_ecr_repository.worker.arn],
+        )
       },
       {
         # Decrypt the data volume and the application secrets.

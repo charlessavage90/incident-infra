@@ -214,4 +214,26 @@ else
 fi
 %{ endfor ~}
 
+# --- The pipeline's own Timesketch account (spec 4.1 finalisation) ---
+#
+# Named rather than shared. Timesketch attributes every timeline to a user, and
+# "which human imported this" should not be answered with "a robot using Alice's
+# credentials". There is no AWS IAM integration in Timesketch, so the Batch
+# worker must present a password like any other client.
+if ! docker compose exec -T timesketch-web tsctl list-users 2>/dev/null | grep -qx "${pipeline_user}"; then
+  echo "creating Timesketch user ${pipeline_user}"
+  # set -x is on for this script, which would otherwise echo the generated
+  # password into /var/log/cloud-init-output.log in plaintext, readable by
+  # anyone who can reach this instance. Disable tracing around the secret.
+  set +x
+  PW=$(aws secretsmanager get-secret-value --region "$REGION" \
+    --secret-id "${name_prefix}/pipeline" \
+    --query SecretString --output text)
+  docker compose exec -T timesketch-web tsctl create-user "${pipeline_user}" --password "$PW" >/dev/null 2>&1
+  unset PW
+  set -x
+else
+  echo "Timesketch user ${pipeline_user} already exists"
+fi
+
 echo "appliance ready"
