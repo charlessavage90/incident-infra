@@ -115,10 +115,20 @@ resource "aws_lambda_function" "intake" {
   filename         = data.archive_file.intake.output_path
   source_code_hash = data.archive_file.intake.output_base64sha256
 
-  # The server-side copy of a large artifact needs the whole window. This is the
-  # documented Phase 2 ceiling; phase 3 moves the copy into Batch.
+  # The server-side copy of a large artifact needs the whole window.
+  #
+  # 900 seconds stays, and amendment A10 explains why it is not moved to Batch:
+  # Batch is posture-gated and recording must never be. Moving it would have
+  # left an artifact arriving between incidents in intake with a seven-day
+  # expiry and no legal hold.
+  #
+  # Memory is 2 GB not because the function needs the heap -- it streams nothing
+  # and holds no object bytes -- but because Lambda scales NETWORK bandwidth
+  # with memory, and the tuned TransferConfig in handler.py cannot drive a
+  # 256 MB function's allowance. The pair only works together; changing one
+  # without the other wastes the change.
   timeout     = 900
-  memory_size = 256
+  memory_size = 2048
 
   # The server-side copy is the least observable thing here -- it is one boto3
   # call that fans out into UploadPartCopy above 5 GB, across two buckets with
