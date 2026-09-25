@@ -44,8 +44,15 @@ systemctl enable --now docker
 COMPOSE_PLUGIN_DIR=/usr/local/lib/docker/cli-plugins
 mkdir -p "$COMPOSE_PLUGIN_DIR"
 if ! docker compose version >/dev/null 2>&1; then
-  COMPOSE_URI=$(aws ssm get-parameter --region "$REGION" --name "/${name_prefix}/tooling/docker-compose-uri" --query 'Parameter.Value' --output text)
-  COMPOSE_SHA=$(aws ssm get-parameter --region "$REGION" --name "/${name_prefix}/tooling/docker-compose-sha256" --query 'Parameter.Value' --output text)
+  # retry, because these are the first calls through an INTERFACE endpoint.
+  # When activation creates the endpoints in the same apply as a replacement
+  # instance, this runs while the ssm ENI reports "available" but does not yet
+  # forward packets -- GOTCHA 4's race, hitting cloud-init rather than the agent.
+  # Without it the script dies here and the appliance never gets Timesketch
+  # (Phase 3 acceptance, defect 4). Every endpoint call below is wrapped for
+  # the same reason; each endpoint has its own ENI and its own readiness window.
+  COMPOSE_URI=$(retry 10 aws ssm get-parameter --region "$REGION" --name "/${name_prefix}/tooling/docker-compose-uri" --query 'Parameter.Value' --output text)
+  COMPOSE_SHA=$(retry 10 aws ssm get-parameter --region "$REGION" --name "/${name_prefix}/tooling/docker-compose-sha256" --query 'Parameter.Value' --output text)
 
   retry 5 aws s3 cp --region "$REGION" "$COMPOSE_URI" "$COMPOSE_PLUGIN_DIR/docker-compose"
 
@@ -203,7 +210,7 @@ if ! docker compose exec -T timesketch-web tsctl list-users 2>/dev/null | grep -
   # password into /var/log/cloud-init-output.log in plaintext, readable by
   # anyone who can reach this instance. Disable tracing around the secret.
   set +x
-  PW=$(aws secretsmanager get-secret-value --region "$REGION" \
+  PW=$(retry 10 aws secretsmanager get-secret-value --region "$REGION" \
     --secret-id "${name_prefix}/responders/${user}" \
     --query SecretString --output text)
   docker compose exec -T timesketch-web tsctl create-user "${user}" --password "$PW" >/dev/null 2>&1
@@ -226,7 +233,7 @@ if ! docker compose exec -T timesketch-web tsctl list-users 2>/dev/null | grep -
   # password into /var/log/cloud-init-output.log in plaintext, readable by
   # anyone who can reach this instance. Disable tracing around the secret.
   set +x
-  PW=$(aws secretsmanager get-secret-value --region "$REGION" \
+  PW=$(retry 10 aws secretsmanager get-secret-value --region "$REGION" \
     --secret-id "${name_prefix}/pipeline" \
     --query SecretString --output text)
   docker compose exec -T timesketch-web tsctl create-user "${pipeline_user}" --password "$PW" >/dev/null 2>&1

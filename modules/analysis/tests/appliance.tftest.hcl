@@ -301,6 +301,19 @@ run "appliance_waits_for_vpc_endpoints" {
     condition     = strcontains(aws_instance.appliance.user_data, "retry 10 dnf install")
     error_message = "Package installation must retry; cloud-init runs once and a transient failure is unrecoverable."
   }
+
+  # depends_on is not enough: an interface endpoint reports "available" before
+  # its ENI forwards packets. Phase 3 acceptance (defect 4) lost cloud-init to a
+  # connect timeout on the first unretried `aws ssm get-parameter`.
+  assert {
+    condition     = length(regexall("\\$\\(aws ", aws_instance.appliance.user_data)) == 0
+    error_message = "Every AWS API call in cloud-init goes through an interface endpoint that may not be forwarding yet; an unretried one fails the whole script."
+  }
+
+  assert {
+    condition     = length(regexall("\\$\\(retry 10 aws ", aws_instance.appliance.user_data)) >= 3
+    error_message = "The compose lookups and the secret reads must retry; they are the first calls through the ssm and secretsmanager endpoints."
+  }
 }
 
 # gunicorn opens /var/log/timesketch/wsgi_error.log at startup and exits if the
