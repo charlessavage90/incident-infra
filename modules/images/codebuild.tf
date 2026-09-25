@@ -21,6 +21,14 @@ locals {
     "timesketch_client.py" = "${path.module}/../../containers/plaso-worker/timesketch_client.py"
     "Dockerfile"           = "${path.module}/../../containers/plaso-worker/Dockerfile"
   }
+
+  # Part of the worker's image tag. The mirror skips any tag that already
+  # exists, so a tag derived from the base digest alone made every change to the
+  # worker's own source invisible: the fixed Dockerfile staged, the build ran,
+  # and the stale image was kept (Phase 3 acceptance, defect 7).
+  worker_source_hash = substr(sha256(join("", [
+    for name in sort(keys(local.worker_source_files)) : filesha256(local.worker_source_files[name])
+  ])), 0, 12)
 }
 
 resource "aws_s3_object" "worker_source" {
@@ -52,6 +60,7 @@ locals {
     ECR_NGINX              = var.ecr_repository_urls["nginx"]
     ECR_PLASO_WORKER       = var.ecr_repository_urls["plaso-worker"]
     WORKER_SOURCE_PREFIX   = local.worker_source_prefix
+    WORKER_SOURCE_HASH     = local.worker_source_hash
     TIMESKETCH_VERSION     = var.timesketch_version
     OPENSEARCH_VERSION     = var.opensearch_version
     POSTGRES_VERSION       = var.postgres_version

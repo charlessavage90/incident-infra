@@ -209,3 +209,35 @@ run "mirror_can_list_the_worker_build_context" {
     error_message = "ListBucket should be scoped to the worker build-context prefix, not the whole tooling bucket."
   }
 }
+
+# The mirror skips any tag that exists. A tag keyed on the base digest alone
+# hid every change to the worker's own source -- Phase 3 acceptance (defect 7)
+# staged a fixed Dockerfile and the build kept the broken image.
+run "worker_tag_changes_when_its_source_changes" {
+  command = plan
+
+  assert {
+    condition     = strcontains(one(aws_codebuild_project.mirror.source).buildspec, "-src-$WORKER_SOURCE_HASH")
+    error_message = "Without the source hash in the tag, an edited worker.py or Dockerfile is skipped as already built."
+  }
+
+  assert {
+    condition = anytrue([
+      for e in one(aws_codebuild_project.mirror.environment).environment_variable :
+      e.name == "WORKER_SOURCE_HASH" && length(e.value) == 12
+    ])
+    error_message = "The build needs the source hash OpenTofu computed from the files it staged."
+  }
+}
+
+# The Timesketch base has plaso and requests but not boto3 (defect 6). Pinned,
+# because the mirror's build runs with an internet route and an unpinned install
+# would make two builds of one source hash differ.
+run "worker_image_installs_a_pinned_boto3" {
+  command = plan
+
+  assert {
+    condition     = length(regexall("pip install [^\n]*boto3==[0-9.]+", file("${path.module}/../../containers/plaso-worker/Dockerfile"))) == 1
+    error_message = "Every job dies on `import boto3` without it; unpinned, the image stops being a function of its source hash."
+  }
+}

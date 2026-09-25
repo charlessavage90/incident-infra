@@ -10,12 +10,16 @@
 # ppa:gift, so two builds of one release tag can carry different plaso versions,
 # and Timesketch rejects a .plaso produced by a newer plaso than it runs.
 #
-# Nothing is installed here. The VPC has no internet route, so a RUN that
-# reached for a package would fail at build time in CodeBuild's network and at
-# runtime in ours -- and the whole point of deriving from the Timesketch image
-# is that plaso and boto3 are already in it.
+# One package is installed, at BUILD time. The Timesketch image carries plaso and
+# requests in /opt/venv but NOT boto3 -- an earlier draft of this file assumed it
+# did, and every job died on `import boto3` (Phase 3 acceptance, defect 6).
+# Build time is CodeBuild, which runs outside the VPC with an internet route, so
+# this does not contradict the VPC having none. Pinned to the version the
+# worker's test suite runs against; bump the two together.
 ARG TIMESKETCH_BASE
 FROM ${TIMESKETCH_BASE}
+
+RUN /opt/venv/bin/python3 -m pip install --no-cache-dir boto3==1.43.94
 
 COPY worker.py /usr/local/bin/worker.py
 COPY timesketch_client.py /usr/local/bin/timesketch_client.py

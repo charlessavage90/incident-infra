@@ -75,7 +75,7 @@ printf 'message,datetime,timestamp_desc\nhello,2026-01-01T00:00:00,Test\n' > sam
 | # | Check | How | Pass |
 |---|---|---|---|
 | 1 | Platform applies | `tofu apply` in `envs/example/platform` | Worker repository, DynamoDB gateway endpoint and evidence notification all created |
-| 2 | The worker image is built and published | `aws ssm get-parameter --name /<prefix>/images/plaso-worker` | A `repo@sha256:` value, tag `ts-<12 hex>` |
+| 2 | The worker image is built and published | `aws ssm get-parameter --name /<prefix>/images/plaso-worker` | A `repo@sha256:` value, tag `ts-<12 hex>-src-<12 hex>` (base digest, then worker source) |
 | 3 | **Version parity** | `docker run --rm --entrypoint log2timeline.py <worker digest> --version` and, on the appliance, `docker compose exec -T timesketch-web log2timeline.py --version` | Identical plaso versions. This is the §8 assertion that finally has two things to compare |
 | 4 | Activation brings up the fleet | `tofu apply -var='posture=active'` | Eleven interface endpoints; compute environment `ENABLED` and `VALID` |
 | 5 | **The compose fix** | On the appliance: `docker compose ps` then `docker compose logs timesketch-web \| head -50` | The three backing services report `healthy` before web starts; no restart-loop entries for web or worker. **This is the success condition `NEXT.md` has carried since Phase 1** |
