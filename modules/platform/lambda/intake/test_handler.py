@@ -63,3 +63,39 @@ def test_missing_configuration_names_itself(monkeypatch):
     monkeypatch.delenv("CASES_TABLE", raising=False)
     with pytest.raises(handler.IntakeError, match="CASES_TABLE"):
         handler._config("CASES_TABLE")
+
+
+def test_the_copy_is_tuned_rather_than_left_at_boto3_defaults(monkeypatch):
+    """boto3's default multipart chunk is 8 MB with ten threads, which is the
+    difference between a ceiling in the low hundreds of GB and one well above
+    it.
+
+    Spec 5.5 originally planned to remove this ceiling by moving the copy to
+    Batch. That was withdrawn in amendment A10: Batch is posture-gated, so the
+    move would have made recording posture-gated, and an artifact arriving
+    between incidents would sit in intake with a seven-day expiry and no legal
+    hold -- the silent gap 5.5 exists to prevent.
+
+    The real ceiling is a measurement, not a config value; see
+    docs/acceptance/phase-3.md check 9. This asserts only that the knobs are set.
+    """
+    captured = {}
+
+    class FakeS3:
+        def copy(self, **kwargs):
+            captured.update(kwargs)
+
+        def put_object_legal_hold(self, **kwargs):
+            pass
+
+    monkeypatch.setitem(handler._CLIENTS, "s3", FakeS3())
+    monkeypatch.setenv("EVIDENCE_BUCKET", "ir-evidence")
+
+    meta = handler.ArtifactMetadata(
+        sha256="abc", case_id="CASE-1", source="laptop", size_bytes=1
+    )
+    handler._copy_and_hold("ir-intake", "CASE-1/triage.zip", meta)
+
+    config = captured["Config"]
+    assert config.multipart_chunksize >= 64 * 1024 * 1024
+    assert config.max_concurrency >= 20

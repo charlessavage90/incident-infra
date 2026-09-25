@@ -20,23 +20,39 @@ changing anything structural:
 - `docs/superpowers/plans/2026-09-14-phase-2-evidence-store.md` — Phase 2 implementation, and the
   place three decisions the spec left open are argued: write-before-copy, the separate legal-hold
   call, and no `prevent_destroy` on the evidence buckets
+- `docs/superpowers/plans/2026-09-16-phase-3-ingest-pipeline.md` — Phase 3 implementation, and
+  where the four decisions the spec left open are argued: D14's re-examination, §5.5's
+  self-contradiction, which bucket the pipeline triggers from, and how the worker reaches
+  Timesketch
 - `docs/acceptance/phase-1.md` — the acceptance gate, plus a table of the six defects the first
   real run exposed
 - `docs/acceptance/phase-2.md` — the Phase 2 gate, plus a table of the three defects its first
   real run exposed
+- `docs/acceptance/phase-3.md` — the Phase 3 gate, its results, and a table of the twelve
+  defects its first real run exposed
 
-Phases 1 and 2 are complete and acceptance-passed against a real AWS account. Phases 3–4 (ingest
-pipeline, lifecycle) are specified but not built.
+Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account. Phase 3
+passed 14 of 15 checks; **check 10 fails on its premise** (finding 13 in the acceptance doc — plaso's
+`filestat` events), which is deferred with a success condition rather than fixed. Phase 4
+(lifecycle) is specified but not built.
 
 **Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
 Phase 1's acceptance run found six defects in code that looked finished; Phase 2's found three,
-all of them authorisation failures that `mock_provider` cannot see. Assume the next phase behaves
-the same way.
+all of them authorisation failures that `mock_provider` cannot see; Phase 3's found **twelve**. Four
+were authorisation or timing failures of the same kind. Eight were **contract failures against
+Timesketch** — what its image contains, how it issues a CSRF token, which upload fields it
+requires, that it indexes asynchronously — and every Python test was green throughout, because the
+fakes encoded the same wrong beliefs as the code. **A fake is only as good as the capture behind
+it:** where a worker test now pins upstream behaviour, its fixture was captured from the appliance.
+Assume the next phase behaves the same way.
 
-The design document carries an **§12 Amendments** table. Eight corrections have been made in place
-rather than in a parallel errata file; read §12 before trusting a remembered reading of that
-document. A1, A3, A4, A7 and A8 changed load-bearing behaviour; A2 records a code defect that is
-still open and tracked in `NEXT.md`.
+The design document carries an **§12 Amendments** table. Fourteen corrections have been made in
+place rather than in a parallel errata file; read §12 before trusting a remembered reading of that
+document. A1, A3, A4, A7, A8, A10, A11, A12 and A14 changed load-bearing behaviour. A2's open half —
+the dropped compose healthchecks — is now fixed. A9 replaces D14's *reasoning* without changing its
+conclusion, and A10 **withdraws** something §5.5 previously promised, so a remembered reading of
+either is likely to be wrong. **A13 is an open gap, not a settled change:** §4.3's zero-events
+fallback cannot fire on the plaso route as built.
 
 ## Commands
 
@@ -74,30 +90,37 @@ cd modules/platform && tofu test -filter=tests/network.tftest.hcl      # Linux/m
 `Success! 0 passed, 0 failed` — it does not error. Always check the count, or you will believe
 tests ran when none did.
 
-**Python.** The repo has two Python trees since Phase 2 — `cli/` (`irctl`) and
-`modules/platform/lambda/intake/` (the recorder). They are separate suites with separate CI
-jobs and separate working directories; there is no single command that runs both.
+**Python.** The repo has four Python trees since Phase 3 — `cli/` (`irctl`),
+`modules/platform/lambda/intake/` (the recorder), `modules/analysis/lambda/pipeline/` (claim and
+reconcile) and `containers/plaso-worker/` (the worker). They are separate suites with separate CI
+jobs and separate working directories; there is no single command that runs them all.
 
 ```bash
 python -m venv .venv                                  # .venv/ is gitignored
 ./.venv/Scripts/python.exe -m pip install -e "cli[dev]"
 ./.venv/Scripts/python.exe -m pip install boto3 pytest
 
-cd cli && python -m pytest tests -v                                  # irctl, 16 tests
-cd modules/platform/lambda/intake && python -m pytest test_handler.py -v   # recorder, 7 tests
+cd cli && python -m pytest tests -v                                     # irctl, 16
+cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
+cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
+cd containers/plaso-worker && python -m pytest -v                       # worker, 33
 ```
 
-**No test anywhere touches AWS.** The HCL uses `mock_provider`; `irctl` uses
-`botocore.Stubber`; the recorder's tests are pure functions. No credentials, no network, no
-cost. Current counts — **check them, a filter that matches nothing still reports success**:
+The worker suite needs `requests` as well as `boto3` and `pytest`; see
+`containers/plaso-worker/requirements-dev.txt`.
+
+**No test anywhere touches AWS.** The HCL uses `mock_provider`; every Python suite uses
+`botocore.Stubber` or an injected fake. No credentials, no network, no cost. Current counts — **check them, a filter that matches nothing still reports success**:
 
 | Suite | Count |
 |---|---|
-| `modules/platform` | 48 run blocks |
-| `modules/images` | 7 |
-| `modules/analysis` | 26 |
+| `modules/platform` | 52 run blocks |
+| `modules/images` | 12 |
+| `modules/analysis` | 45 |
 | `cli` | 16 tests |
-| `modules/platform/lambda/intake` | 7 tests |
+| `modules/platform/lambda/intake` | 8 tests |
+| `modules/analysis/lambda/pipeline` | 20 tests |
+| `containers/plaso-worker` | 33 tests |
 
 **Posture toggle** (applies real infrastructure, costs money):
 
@@ -114,7 +137,7 @@ Three modules with independent state. The split is the design, not organisation.
 | Module | Lifetime | Holds |
 |---|---|---|
 | `modules/platform/` | **Permanent** | VPC, KMS, ECR, IAM, private DNS, budget alarm, tooling bucket, **the EBS data volume**, and the whole **evidence store** — four buckets, both manifest tables, the intake recorder, CloudTrail |
-| `modules/analysis/` | **Toggleable** | Appliance, VPC interface endpoints, secrets — driven by `var.posture` |
+| `modules/analysis/` | **Toggleable** | Appliance, VPC interface endpoints, secrets, **the plaso Batch fleet, the Step Functions pipeline and both its triggers** — driven by `var.posture` |
 | `modules/images/` | Independent | CodeBuild mirror; runs outside the VPC, unaffected by dormancy |
 
 **The EBS data volume lives in `platform/`, not `analysis/`.** That is load-bearing: `tofu destroy`
@@ -199,8 +222,18 @@ catches is no longer transfer corruption — that never reaches storage. It is a
 transferred perfectly and was filed against the wrong case, which under per-case COMPLIANCE mode
 nobody can undo.
 
-**Known ceiling:** the copy is driven by a Lambda under a 900-second timeout. Phase 3 moves it into
-Batch. It fails loudly and the object stays in intake.
+**Known ceiling:** the copy is driven by a Lambda under a 900-second timeout. It fails loudly and
+the object stays in intake.
+
+**Phase 3 was supposed to move that copy into Batch and does not (amendment A10), because doing so
+would break the property §5.5 exists to provide.** Batch is posture-gated — the compute environment
+is `DISABLED` when dormant — so an artifact arriving between incidents would sit in intake with a
+7-day expiry and no legal hold, its manifest row stuck at `recording`, until someone woke the
+environment. The ceiling is raised in place instead: a tuned `TransferConfig` in `handler.py` **and**
+2 GB of function memory, because Lambda scales network bandwidth with memory and neither change
+does anything without the other. **Measured, not assumed: roughly 480 GiB** fits inside the 900 s
+timeout, extrapolated from one 5.5 GiB copy — an order of magnitude, not a guarantee. The
+measurement itself is `docs/acceptance/phase-3.md` check 9; update it there, not here.
 
 **`irctl` is configured entirely from environment variables** so it holds no state:
 `IR_INTAKE_BUCKET`, `IR_CASES_TABLE`, `IR_RETENTION_YEARS` — each a `tofu output` from
@@ -302,8 +335,92 @@ principal will need the same treatment, and will fail the same uninformative way
 
 **The root statement is the one that cannot be dropped.** An explicit key policy that omits
 `EnableRootAccountAccess` **cannot be edited by anyone**, and the key becomes unusable and
-undeletable except by scheduling deletion. Do not tidy it away. A test asserts all three
-statements.
+undeletable except by scheduling deletion. Do not tidy it away. Tests assert every statement by
+`Sid`: the root statement, the two service statements above, and the two Auto Scaling statements
+described under *The ingest pipeline* below.
+
+### The ingest pipeline (Phase 3)
+
+**There are two triggers and the second one is not redundant.** An EventBridge rule on the
+*evidence* bucket starts the state machine within seconds; a scheduled reconciler (`sweep`) scans
+the manifest every `sweep_interval_minutes` while active. Deleting the rule would cost latency.
+Deleting the sweep would silently strand **every artifact that arrived while the environment was
+dormant** — their S3 events fired when the rule was `DISABLED` and those events are gone. That is
+most artifacts, because accumulating them between incidents is what an evidence store is for.
+
+**The trigger hangs off evidence, not intake (A11).** §4.1's original diagram fanned out from
+intake, which cannot work now the recorder clears the intake object on success: the pipeline would
+race a `DeleteObject` and read a bucket whose contents expire in `intake_expiry_days`.
+
+**The event pattern deliberately does not filter on `detail.reason`.** The recorder's server-side
+copy is a `CopyObject` below 5 GB and a `CompleteMultipartUpload` above it, so a reason filter
+would silently skip exactly the large artifacts.
+
+**Both triggers converge on one conditional DynamoDB write**, `recorded → timelining`, in the claim
+Lambda. Deduplication is that write failing, not a check before it — the same argument, and
+deliberately the same shape, as the recorder's `_claim`. A stale `timelining` row becomes
+re-claimable after `STALE_CLAIM_HOURS`, which **must stay at or above the Batch job definition's
+`attempt_duration_seconds`**; below it, the sweep would re-drive work still in flight and produce a
+duplicate timeline.
+
+**`batch:submitJob.sync` needs `events:PutRule`.** Step Functions implements the `.sync` wait by
+creating a managed EventBridge rule (`StepFunctionsGetEventsForBatchJobsRule`). Without
+`events:PutRule`, `PutTargets` and `DescribeRule` every execution fails at the first Batch state
+with an error naming **EventBridge**, which is not where anyone looks.
+
+**The Batch launch template's user data must be MIME multipart.** Batch *appends* its `ECS_CLUSTER`
+configuration to whatever the template supplies, and can only do that to an archive. A plain shell
+script is replaced rather than merged, and the symptom is silence: instances launch, look healthy,
+never join the cluster, and every job sits in `RUNNABLE` with no error in Batch, in ECS, or on the
+instance. Missing `ecs` / `ecs-agent` / `ecs-telemetry` endpoints produce the identical symptom, so
+check both.
+
+**The worker image is tagged `ts-<base digest>-src-<source hash>`, not by `timesketch_version`.**
+The mirror's idempotency rule is "tag exists, skip", and a version-tagged worker would let that rule
+hide a stale base — the exact mechanism that left `postgres:13.0-alpine` in the development account
+after the pin moved. **The base is only half of what goes into the image:** a tag keyed on it alone
+skipped every change to `worker.py` and the Dockerfile, which is how a fixed worker nearly failed to
+ship (Phase 3 defect 7). The source hash is computed by OpenTofu from the files it stages.
+
+**Batch uses its service-linked role, and the CMK names Auto Scaling's.** No `service_role` on the
+compute environment: a custom role created in the same apply lost an IAM propagation race and the
+environment went `INVALID` with no retry. And the fleet's encrypted root volumes are launched by
+`AWSServiceRoleForAutoScaling`, which the key policy must allow explicitly — otherwise every
+instance dies before `InService` with `Client.InvalidKMSKey.InvalidState`, naming neither. Those
+statements use `Principal "*"` pinned by `aws:PrincipalArn`, because KMS rejects a policy naming a
+principal that does not exist, and that role only exists after an account's first Auto Scaling use.
+A test requires any wildcard principal in the key policy to carry that pin.
+
+**The compute environment carries `name_prefix`, not `name`.** It is `create_before_destroy`, and
+Batch names are unique; a fixed name makes every replacement fail.
+
+**The appliance's user data is gzipped and near a hard limit.** It crossed EC2's 16 KB cap when
+Phase 3 added the data-file copy. A test fails at 75% of the limit; past that, move the embedded
+config out of cloud-init rather than trimming comments.
+
+**The worker is the evidence store's second reader, and A7's asymmetry does not protect it
+(A12).** That asymmetry is a property of the *recorder*, not of the bucket. The worker's job role
+holds `s3:GetObject` on evidence, no delete of any kind, and no legal hold — and a test asserts
+the absence of both by **action**, because `mock_resource` gives all four buckets one ARN and any
+assertion about which bucket a policy names passes vacuously.
+
+**Neither pipeline Lambda touches S3 at all.** The claim step resolves a missing digest by querying
+the manifest rather than by `HeadObject`, specifically so `s3:GetObject` on evidence stays confined
+to the worker. Adding it to the claim role would be the easy, wrong fix for a lookup failure.
+
+**Keys arrive URL-encoded from EventBridge and raw from the sweep.** They are passed under
+different field names (`evidence_key_encoded` versus `evidence_key`) rather than sniffed apart:
+decoding a raw key would corrupt any containing a literal `+` or `%`.
+
+**The Batch job queue stays `ENABLED` while dormant; only the compute environment is `DISABLED`.**
+A job submitted against a disabled environment waits. A job submitted against a disabled queue is
+rejected outright, and a rejected job is an artifact that never gets timelined.
+
+**Timesketch's web container binds all interfaces, not loopback.** That is not a D6 violation: D6
+forbids *public* ingress, and there is no public IP, no internet gateway, and a security group
+admitting exactly two sources. The bind is not the control; the security group is. The worker
+authenticates as a dedicated `pipeline` local account — Timesketch has no AWS IAM integration, so
+it must present a password like any other client.
 
 ### `modules/analysis/templates/cloud-init.sh.tftpl`
 
@@ -321,6 +438,17 @@ is a systemd unit.
    connections. Dormancy destroys the endpoints; on reactivation the agent races ENI readiness,
    loses, logs `entering hibernation due to error`, and backs off **for up to an hour**. Terraform
    `depends_on` does not fix this: the endpoint reports `available` before its ENI forwards packets.
+
+Three more lines added by Phase 3 acceptance, each after a real failure:
+
+5. **Every AWS call through an interface endpoint is wrapped in `retry`.** Guard 4's race also hits
+   cloud-init itself when endpoints and a replacement instance are created in the same apply; an
+   unretried `aws ssm get-parameter` timed out and left an appliance with no Timesketch.
+6. **Timesketch's data files are copied out of the pinned image** into `/opt/timesketch/etc`
+   (`cp -n`, so our `timesketch.conf` survives). Without `plaso.mappings` every `.plaso` import
+   fails in psort.
+7. **The rendered script is near EC2's 16 KB user-data limit**, and is gzipped for that reason.
+   Tests assert on `local.cloud_init`, the uncompressed text, not on the resource attribute.
 
 `set -x` is on throughout, so anything handling a secret must be wrapped in `set +x` / `set -x`.
 Responder passwords leaked into `/var/log/cloud-init-output.log` until that was added.
@@ -342,6 +470,13 @@ All verified against upstream sources during design; each shaped a decision.
   `azure_activity_log`, `gcp_log`, and `microsoft_audit_log`. So plaso covers more cloud than
   expected — but **no Okta, no Entra sign-in logs, no Google Workspace**.
 - `log2timeline` auto-detects, so the pipeline routes by extension rather than classifying (D4).
+- **Its `filestat` parser emits three `fs:stat` events for the file it was pointed at** — here the
+  worker's scratch copy, stamped with processing time. So no single file ever yields zero events,
+  and every plaso timeline carries three events an analyst can mistake for incident activity
+  (Phase 3 finding 13). Excluding `filestat` wholesale is wrong: inside a disk image it is what
+  produces the file-system timestamps.
+- An EVTX record becomes **two** events (`Creation Time`, `Content Modification Time`). plaso's
+  `test_data/evtx/System.evtx` holds 5,009 records and indexes as 10,021 events (2 × 5,009 + 3).
 
 ### Timesketch
 
@@ -361,6 +496,19 @@ All verified against upstream sources during design; each shaped a decision.
   `appliance.tf`, so resizing needs no other change.
 - The API client (`timesketch_api_client`) is **not** installed in the web container. Scripted
   interaction means the REST API with a session cookie and CSRF token.
+- The image's `/opt/venv` carries plaso and `requests` but **not `boto3`**.
+- **The CSRF token is in the login page's HTML** — a hidden `csrf_token` field and a `csrf-token`
+  meta tag. The only cookie `GET /login/` sets is `session`.
+- **`POST /api/v1/upload/` requires `total_file_size`.** It defaults to 0 and 0 is rejected as
+  *"File is empty"*, whatever the file holds.
+- **Upload returns before indexing.** The new datasource reads `queueing` with 0 events; `ready` or
+  `fail` comes later, from the `timesketch-worker` container.
+- **Uploading to an existing timeline name appends a datasource**; it does not replace. Repeated
+  imports duplicate events unless the caller checks first.
+- `timesketch.conf` names data files (`plaso.mappings`, `tags.yaml`, `context_links.yaml`, …) that
+  must sit beside it in `/etc/timesketch`. The image ships them in `/opt/venv/share/timesketch`.
+  Without `plaso.mappings` every `.plaso` import fails in psort; CSV imports never notice.
+- Several timelines share one OpenSearch index; filter on `__ts_timeline_id` to see one.
 
 ### AWS behaviours that drove decisions
 
@@ -389,10 +537,12 @@ All verified against upstream sources during design; each shaped a decision.
   rather than of the module.
 - OpenTofu 1.12 has **no** `source` argument on `mock_provider`, so the mock block is duplicated
   across each module's test files. **Run `python scripts/sync-test-mocks.py` rather than editing
-  one file.** Keeping them in sync by hand is what failed: adding the intake Lambda broke seven
-  runs in files nobody had touched, because only the new test file mocked `aws_iam_role` and the
+  one file.** Keeping them in sync by hand is what failed, twice: adding the intake Lambda broke
+  seven runs in `modules/platform` files nobody had touched, and the Phase 3 Batch fleet did the
+  same in `modules/analysis`. Both times only the new test file mocked `aws_iam_role`, and the
   provider validates role ARNs. The error names the ARN, never the missing mock. The script
-  regenerates every platform test file's preamble from one canonical block.
+  regenerates **both modules'** preambles, each from its own canonical block — their needs differ,
+  but within a module they must not.
 - Mocks must supply anything the provider *validates* and anything returned as a *list*. Known
   necessities: `aws_availability_zones.names` (empty otherwise), and ARNs for `aws_kms_key`,
   `aws_ecr_repository`, `aws_iam_role`; plus `aws_subnet.availability_zone`, `aws_ami.id`,
@@ -460,6 +610,47 @@ Development does not need a dedicated IR account; nothing in phases 1–4 requir
 - Interface endpoints are the largest active cost — larger than the appliance itself before they
   were narrowed to one AZ.
 
+### Operating the pipeline
+
+Procedures the Phase 3 acceptance run depended on. None is automated yet.
+
+- **Apply reviewed saved plans, never `-auto-approve`.** `tofu -chdir=envs/example/<layer> plan
+  -out=tfplan`, read it, then `tofu -chdir=... apply tfplan`. Claude Code's auto mode refuses a
+  blind apply, and a saved plan is what makes a replacement (the appliance's `user_data`, the
+  compute environment) visible before it happens. `.claude/settings.local.json` on the owner's
+  machine allows `tofu -chdir=envs/example/{platform,images,analysis} apply` and denies `tofu
+  destroy`; it is gitignored and local to that machine.
+- **Changing the worker is three steps, and the third is easy to forget.** Apply `images` (stages
+  the source, updates the tag hash), run the mirror (`aws codebuild start-build --project-name
+  <prefix>-image-mirror`), then **re-apply `analysis`**: the Batch job definition reads the worker
+  digest from SSM at *apply* time, so a rebuilt image does nothing until a new job definition
+  revision is registered. Confirm with `aws batch describe-job-definitions --job-definition-name
+  <prefix>-plaso-worker --status ACTIVE`.
+- **Re-driving a `failed` row** (no command exists yet — NEXT.md): a conditional update back to
+  `recorded`, appending to `custody` so the chain of custody records the operator action, then let
+  the sweep take it:
+
+  ```bash
+  aws dynamodb update-item --table-name <prefix>-artifacts \
+    --key '{"case_id":{"S":"CASE"},"sha256":{"S":"HASH"}}' \
+    --update-expression 'SET #s = :r, custody = list_append(custody, :n)' \
+    --condition-expression '#s = :f' --expression-attribute-names '{"#s":"status"}' \
+    --expression-attribute-values '{":r":{"S":"recorded"},":f":{"S":"failed"},":n":{"L":[{"S":"<utc> re-driven by operator: <why>"}]}}'
+  ```
+
+- **The sweep can be run on demand** rather than waiting `sweep_interval_minutes`:
+  `aws lambda invoke --function-name <prefix>-pipeline-sweep --payload '{}' out.json`. It runs the
+  same code the schedule does and returns `{"started": N}`.
+- **Where to look when an artifact fails.** The manifest row's `status`; the execution history in
+  Step Functions (the `TaskFailed` cause names the log stream); the worker's log group
+  `/aws/batch/<prefix>-plaso-worker`. Worker errors carry Timesketch's response body. If a job sits
+  in `RUNNABLE`, read the Auto Scaling group's scaling activities — defect 5's KMS failure was
+  visible there and nowhere else.
+- **Talking to Timesketch as the pipeline** from the appliance: the password is the
+  `<prefix>/pipeline` secret; log in via `GET /login/`, take the token from the HTML, `POST`
+  credentials with it. The appliance role **cannot read the plaso bucket**, by design — the worker
+  pushes files to Timesketch over the API.
+
 **Local state files contain generated secrets in plaintext.** `envs/example/*/terraform.tfstate`
 holds the `random_password` results. They are gitignored; keep it that way, and do not paste their
 contents anywhere.
@@ -488,6 +679,9 @@ Every one of these cost real time.
   the script locally, base64-encode it, and send one command:
   `echo <b64> | base64 -d > /root/x.sh && bash /root/x.sh`.
 - Results come from `aws ssm get-command-invocation` and need roughly 20–25 seconds after sending.
+- **Write the script to a file on the instance, then run it with `</dev/null`** — never
+  `... | base64 -d | bash`. `docker compose exec -T` inherits the script's stdin and swallows every
+  line after it, and the command reports `Success` with empty output.
 
 ## Repository workflow
 
@@ -501,13 +695,30 @@ Every one of these cost real time.
 
 ## Snyk
 
-Run `snyk_iac_scan` on `modules/platform` and `snyk_code_scan` on `cli` and
-`modules/platform/lambda` after touching either.
+Run `snyk_iac_scan` on `modules/platform` **and `modules/analysis`**, and `snyk_code_scan` on
+`cli`, `modules/platform/lambda`, `modules/analysis/lambda` and `containers/plaso-worker`, after
+touching any of them.
 
 **Nothing above low severity, and 0 Snyk Code findings.** The low count moves whenever a resource
 is added — it was 13, then 14 when the Lambda arrived, then 13 again once X-Ray tracing was
 enabled — so **re-run the scan rather than trusting a number written here or in a commit
-message.** The lows are accepted and **left visible rather than suppressed**, with reasoning
+message.**
+
+**Scanning a module directory does not pick up the repository-root `.snyk`**, so
+`SNYK-CC-AWS-426` shows as an unignored low against `modules/analysis`. That is the suppression
+working, not a regression.
+
+Phase 3 raised two findings and both were real:
+
+- **A medium on the new DynamoDB gateway endpoint** (`SNYK-CC-AWS-428`, no endpoint policy). The
+  first draft omitted it, arguing nothing writes evidence to DynamoDB so there was nothing to
+  exfiltrate. That misses the direction of the threat — without the account condition a compromised
+  worker could reach a table in an *attacker's* account. Fixed, not suppressed.
+- **A path traversal in the worker** (`CWE-23`). `os.path.basename("CASE-1/..")` is `".."`, which
+  lands a download one level above the scratch directory. `safe_local_path` resolves and bounds it.
+
+X-Ray is enabled on the two pipeline Lambdas for the same reason as the recorder's: a failure that
+spans Lambda, Batch and DynamoDB is not diagnosable from one service's log lines. The lows are accepted and **left visible rather than suppressed**, with reasoning
 grouped by rule in the headers of `evidence.tf`, `audit.tf` and `storage.tf`. Three are not
 weaknesses the scanner can see through:
 

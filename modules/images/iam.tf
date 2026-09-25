@@ -37,12 +37,17 @@ resource "aws_iam_role_policy" "mirror" {
         Resource = "*"
       },
       {
-        Sid    = "EcrPush"
+        # BatchGetImage and GetDownloadUrlForLayer are for PULLING, not pushing,
+        # and the worker build needs them: it is FROM the timesketch image that
+        # this same build just pushed to private ECR.
+        Sid    = "EcrPushAndPullOwnBase"
         Effect = "Allow"
         Action = [
           "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
           "ecr:CompleteLayerUpload",
           "ecr:DescribeImages",
+          "ecr:GetDownloadUrlForLayer",
           "ecr:InitiateLayerUpload",
           "ecr:PutImage",
           "ecr:UploadLayerPart",
@@ -51,19 +56,40 @@ resource "aws_iam_role_policy" "mirror" {
       },
       {
         # Scoped to this deployment's parameters only.
-        Sid    = "PublishImageDigests"
+        #
+        # GetParameter is not symmetry: the worker build reads back the
+        # timesketch digest this build published moments earlier, which is how
+        # the spec 4.5 parity invariant is enforced within one run rather than
+        # across two.
+        Sid    = "PublishAndReadImageDigests"
         Effect = "Allow"
-        Action = "ssm:PutParameter"
+        Action = ["ssm:PutParameter", "ssm:GetParameter"]
         Resource = [
           "arn:aws:ssm:*:*:parameter/${var.name_prefix}/images/*",
           "arn:aws:ssm:*:*:parameter/${var.name_prefix}/tooling/*",
         ]
       },
       {
+        # GetObject is for the worker's build context, which OpenTofu stages
+        # here because CodeBuild is NO_SOURCE and has nothing to check out.
         Sid      = "MirrorTooling"
         Effect   = "Allow"
-        Action   = ["s3:PutObject"]
+        Action   = ["s3:PutObject", "s3:GetObject"]
         Resource = "arn:aws:s3:::${var.tooling_bucket}/*"
+      },
+      {
+        # `aws s3 cp --recursive` fetches the worker's build context by listing
+        # the prefix first, and ListObjectsV2 is authorised on the BUCKET ARN,
+        # not the object ARN above. Without this the build fails at AccessDenied
+        # on ListBucket (Phase 3 acceptance, defect 1). Scoped to the context
+        # prefix so the role still cannot enumerate the rest of the bucket.
+        Sid      = "ListWorkerBuildContext"
+        Effect   = "Allow"
+        Action   = "s3:ListBucket"
+        Resource = "arn:aws:s3:::${var.tooling_bucket}"
+        Condition = {
+          StringLike = { "s3:prefix" = ["${local.worker_source_prefix}/*"] }
+        }
       },
       {
         Sid      = "KmsUse"

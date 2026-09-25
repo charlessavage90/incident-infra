@@ -130,6 +130,40 @@ run "key_policy_lets_cloudtrail_encrypt_and_keeps_root" {
   }
 }
 
+# The Batch fleet's root volumes use this key, and EC2 Auto Scaling launches
+# them as its service-linked role, which the root statement never reaches.
+# Phase 3 acceptance (defect 5): every instance terminated before InService
+# with Client.InvalidKMSKey.InvalidState. That the grant works is AWS
+# behaviour only an acceptance run shows; this pins the shape.
+run "key_policy_lets_autoscaling_launch_encrypted_volumes" {
+  command = plan
+
+  assert {
+    condition = length([
+      for s in jsondecode(aws_kms_key.main.policy).Statement : s
+      if contains(["AllowAutoScalingEbsEncrypt", "AllowAutoScalingEbsGrant"], s.Sid)
+      && s.Condition.StringEquals["aws:PrincipalArn"] == "arn:aws:iam::111122223333:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+    ]) == 2
+    error_message = "Without both statements, pinned to this account's Auto Scaling role, every Batch instance dies at launch on the encrypted root volume."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(aws_kms_key.main.policy).Statement :
+      try(s.Principal.AWS, "") != "*" || can(s.Condition.StringEquals["aws:PrincipalArn"])
+    ])
+    error_message = "A wildcard principal in the key policy must be pinned by aws:PrincipalArn, or it grants the key to anyone."
+  }
+
+  assert {
+    condition = one([
+      for s in jsondecode(aws_kms_key.main.policy).Statement : s.Condition.Bool["kms:GrantIsForAWSResource"]
+      if s.Sid == "AllowAutoScalingEbsGrant"
+    ]) == "true"
+    error_message = "CreateGrant must be limited to grants for AWS resources, which is all EBS needs."
+  }
+}
+
 # The intake recorder's log group is CMK-encrypted, and CloudWatch Logs encrypts
 # it as a service principal -- so the same gap that stops CloudTrail stops this.
 # It failed the Phase 2 acceptance apply: CreateLogGroup returned AccessDenied

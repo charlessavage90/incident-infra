@@ -1,4 +1,15 @@
 mock_provider "aws" {
+  # mock_provider invents values for computed attributes, but the AWS provider
+  # VALIDATES some of them -- ARNs especially -- and rejects the invented ones.
+  # Anything returned as a list must be mocked too, or it arrives empty.
+  #
+  # OpenTofu 1.12 has no `source` argument on mock_provider, so this block is
+  # duplicated across every test file in this module. IT MUST BE KEPT IN SYNC:
+  # a resource mocked in one file and not another fails only in the OTHER files,
+  # with an error that names the ARN rather than the missing mock.
+  #
+  # Regenerate all of them rather than editing one:
+  #   python scripts/sync-test-mocks.py
   mock_data "aws_region" {
     defaults = {
       region = "us-east-1"
@@ -34,8 +45,76 @@ mock_provider "aws" {
       arn = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
     }
   }
+
+  # From Phase 3. The Batch compute environment validates both of these as ARNs
+  # before it will plan, and neither is something this module can invent.
+  mock_resource "aws_iam_role" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:role/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_iam_instance_profile" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:instance-profile/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_secretsmanager_secret" {
+    defaults = {
+      arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:ir-test-mock"
+    }
+  }
+
+  # The Batch job queue validates the compute environment ARN it is handed, and
+  # the Lambda permission validates the rule ARN. Neither error names the
+  # missing mock -- both print the invented value and "cannot be parsed as an
+  # ARN", which is why these are here rather than discovered one test run at a
+  # time.
+  mock_resource "aws_batch_compute_environment" {
+    defaults = {
+      arn = "arn:aws:batch:us-east-1:111122223333:compute-environment/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_batch_job_queue" {
+    defaults = {
+      arn = "arn:aws:batch:us-east-1:111122223333:job-queue/ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_batch_job_definition" {
+    defaults = {
+      arn = "arn:aws:batch:us-east-1:111122223333:job-definition/ir-test-mock:1"
+    }
+  }
+
+  mock_resource "aws_sfn_state_machine" {
+    defaults = {
+      arn = "arn:aws:states:us-east-1:111122223333:stateMachine:ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_sns_topic" {
+    defaults = {
+      arn = "arn:aws:sns:us-east-1:111122223333:ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_lambda_function" {
+    defaults = {
+      arn = "arn:aws:lambda:us-east-1:111122223333:function:ir-test-mock"
+    }
+  }
+
+  mock_resource "aws_cloudwatch_event_rule" {
+    defaults = {
+      arn = "arn:aws:events:us-east-1:111122223333:rule/ir-test-mock"
+    }
+  }
 }
 mock_provider "random" {}
+mock_provider "archive" {}
 
 variables {
   name_prefix                     = "ir-test"
@@ -51,6 +130,13 @@ variables {
   private_zone_name               = "ir.internal"
   image_digest_parameter_prefix   = "/ir-test/images"
   responders                      = ["responder"]
+
+  evidence_bucket     = "ir-test-evidence-111122223333"
+  evidence_bucket_arn = "arn:aws:s3:::ir-test-evidence-111122223333"
+  plaso_bucket        = "ir-test-plaso-111122223333"
+  plaso_bucket_arn    = "arn:aws:s3:::ir-test-plaso-111122223333"
+  artifacts_table     = "ir-test-artifacts"
+  artifacts_table_arn = "arn:aws:dynamodb:us-east-1:111122223333:table/ir-test-artifacts"
 }
 
 run "appliance_has_no_public_ip" {
@@ -166,17 +252,17 @@ run "cloud_init_handles_the_three_gotchas" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "vm.max_map_count=262144")
+    condition     = strcontains(local.cloud_init, "vm.max_map_count=262144")
     error_message = "OpenSearch will not start without vm.max_map_count=262144."
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "blkid")
+    condition     = strcontains(local.cloud_init, "blkid")
     error_message = "mkfs MUST be guarded by blkid: cloud-init runs on every boot, and an unguarded format destroys all evidence on the second activation."
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "nvme")
+    condition     = strcontains(local.cloud_init, "nvme")
     error_message = "On Nitro instances the data volume must be resolved by volume ID, not a guessed device path."
   }
 }
@@ -212,8 +298,21 @@ run "appliance_waits_for_vpc_endpoints" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "retry 10 dnf install")
+    condition     = strcontains(local.cloud_init, "retry 10 dnf install")
     error_message = "Package installation must retry; cloud-init runs once and a transient failure is unrecoverable."
+  }
+
+  # depends_on is not enough: an interface endpoint reports "available" before
+  # its ENI forwards packets. Phase 3 acceptance (defect 4) lost cloud-init to a
+  # connect timeout on the first unretried `aws ssm get-parameter`.
+  assert {
+    condition     = length(regexall("\\$\\(aws ", local.cloud_init)) == 0
+    error_message = "Every AWS API call in cloud-init goes through an interface endpoint that may not be forwarding yet; an unretried one fails the whole script."
+  }
+
+  assert {
+    condition     = length(regexall("\\$\\(retry 10 aws ", local.cloud_init)) >= 3
+    error_message = "The compose lookups and the secret reads must retry; they are the first calls through the ssm and secretsmanager endpoints."
   }
 }
 
@@ -230,7 +329,7 @@ run "timesketch_logs_directory_is_mounted" {
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "/mnt/data/logs")
+    condition     = strcontains(local.cloud_init, "/mnt/data/logs")
     error_message = "cloud-init must create the logs directory on the data volume."
   }
 }
@@ -245,7 +344,7 @@ run "responder_passwords_do_not_reach_the_cloud_init_log" {
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "set +x")
+    condition     = strcontains(local.cloud_init, "set +x")
     error_message = "Tracing must be disabled around secret handling or passwords land in cloud-init logs."
   }
 }
@@ -259,7 +358,7 @@ run "instance_state_waits_for_endpoints_on_reactivation" {
   variables { posture = "active" }
 
   assert {
-    condition     = length(aws_vpc_endpoint.interface) == 8
+    condition     = length(aws_vpc_endpoint.interface) == 11
     error_message = "Activation must create the endpoints the instance start depends on."
   }
 
@@ -279,12 +378,104 @@ run "ssm_agent_recovers_on_every_reactivation" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "ssm-endpoint-wait.service")
+    condition     = strcontains(local.cloud_init, "ssm-endpoint-wait.service")
     error_message = "A boot-time unit must restart the SSM agent once its endpoint is reachable, or reactivation can take an hour."
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "systemctl enable ssm-endpoint-wait.service")
+    condition     = strcontains(local.cloud_init, "systemctl enable ssm-endpoint-wait.service")
     error_message = "The unit must be enabled so it runs on stop/start, not just on first boot."
+  }
+}
+
+# The defect NEXT.md carried from Phase 1 acceptance.
+#
+# Upstream gives the three backing services healthchecks and has web and worker
+# wait on condition: service_healthy. Our derived file dropped that for plain
+# list-form depends_on, so Timesketch starts when OpenSearch STARTS rather than
+# when it is READY -- and restart: always masks it, which is why Phase 1
+# acceptance passed over it.
+#
+# These assert the compose TEXT. Whether the restart loop is actually gone can
+# only be seen in `docker compose logs` after a real activation; see
+# docs/acceptance/phase-3.md check 5.
+run "backing_services_gate_on_readiness" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = length(regexall("condition: service_healthy", local.docker_compose)) == 6
+    error_message = "Both timesketch-web and timesketch-worker must gate on all three backing services, or one of them races OpenSearch to readiness."
+  }
+
+  assert {
+    condition     = length(regexall("healthcheck:", local.docker_compose)) == 3
+    error_message = "opensearch, postgres and redis each need a healthcheck; a service_healthy dependency on a service with no healthcheck is a compose error, not a no-op."
+  }
+}
+
+# The worker imports over the REST API, so the web container can no longer bind
+# loopback alone. D6 forbids PUBLIC ingress and this stays private -- no public
+# IP, no internet gateway, and a security group naming exactly two sources.
+run "timesketch_is_reachable_from_the_worker" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = !strcontains(local.docker_compose, "127.0.0.1:5000:5000")
+    error_message = "A loopback-only bind leaves the Batch worker with no way to import the .plaso it just produced."
+  }
+
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.appliance_from_worker.from_port == 5000
+    error_message = "Reachability is granted by security group, not by bind address; without this rule the port is open on the host and closed at the edge."
+  }
+}
+
+# The pipeline account, created the same idempotent way as the responders and
+# with the same set +x discipline -- cloud-init runs with set -x and its log is
+# readable by anyone who can reach the instance.
+run "pipeline_account_password_does_not_reach_the_cloud_init_log" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(local.cloud_init, "${var.name_prefix}/pipeline")
+    error_message = "The worker authenticates as a named pipeline account; cloud-init must create it."
+  }
+
+  assert {
+    condition     = length(regexall("set \\+x", local.cloud_init)) >= 2
+    error_message = "Every secret fetch must be wrapped in set +x. Responder passwords leaked into cloud-init-output.log until that was added; the pipeline password would too."
+  }
+}
+
+# timesketch.conf names data files that must sit beside it. Without
+# plaso.mappings every .plaso import failed in psort (Phase 3 acceptance,
+# defect 11); CSV imports never read it.
+run "appliance_installs_timesketch_data_files_from_the_pinned_image" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(local.cloud_init, "cp -n /opt/venv/share/timesketch/* /out/")
+    error_message = "Without the data files beside timesketch.conf, every .plaso import fails for want of plaso.mappings."
+  }
+
+  assert {
+    condition     = strcontains(local.cloud_init, "test -f /opt/timesketch/etc/plaso.mappings")
+    error_message = "cloud-init should fail loudly at boot, not at the first import, if plaso.mappings is missing."
+  }
+}
+
+# EC2 caps user data at 16 KB. The uncompressed script crossed it in Phase 3
+# acceptance; gzip bought headroom, and this says when that headroom is spent.
+run "appliance_user_data_has_headroom_under_the_ec2_limit" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = length(aws_instance.appliance.user_data_base64) * 3 / 4 < 12288
+    error_message = "Compressed user data is past 75% of EC2's 16 KB limit. Move the embedded config out of cloud-init (e.g. into the tooling bucket) before it stops applying."
   }
 }

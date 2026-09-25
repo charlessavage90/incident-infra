@@ -246,12 +246,19 @@ irctl upload --case CASE-2026-014 triage.zip
    S3 intake      the PUT carries x-amz-checksum-sha256; S3 verifies it
         │         server-side and rejects a mismatched upload (§4.2)
         │
-        ├─s3:ObjectCreated─▶ RecordIntake     manifest entry, written
-        │                                         conditionally so a re-upload
-        │                                         is a no-op; copy to evidence
-        │                                         bucket; legal hold ON (§5.2)
-        │
-        └───EventBridge───▶ Step Functions
+        └─s3:ObjectCreated─▶ RecordIntake     manifest entry, written
+                                 │                conditionally so a re-upload
+                                 │                is a no-op; copy to evidence
+                                 │                bucket; legal hold ON (§5.2);
+                                 │                intake object cleared
+                                 ▼
+                          S3 evidence bucket
+                                 │
+              ┌──EventBridge─────┴───reconciler, while active──┐
+              │  (latency)                        (correctness)│
+              └──────────────────┬────────────────────────────-┘
+                                 ▼
+                          Step Functions
                                    │
                                    ▼
                                  Route            .csv / .jsonl / .json ?
@@ -273,6 +280,16 @@ irctl upload --case CASE-2026-014 triage.zip
 An artifact whose hash fails verification never reaches the bucket at all, so it is never
 recorded and never copied to evidence. `RecordIntake` runs regardless of posture; the Step
 Functions branch does not (§3.2).
+
+**The pipeline hangs off evidence, and it has two triggers, not one (A11).** An earlier draft of
+this diagram fanned out from intake. That cannot work once `RecordIntake` clears the intake object
+on success: the pipeline would race a `DeleteObject` and read from a bucket whose contents expire
+in `intake_expiry_days`. Evidence is the first place the artifact is both immutable and permanent.
+
+The EventBridge rule is the low-latency trigger and the reconciler is the correctness one. An
+artifact recorded while the environment was dormant produced its S3 event at a moment when that
+rule was `DISABLED`, and the event is gone; only a sweep of the manifest will ever timeline it.
+Both converge on one conditional write, so they cannot double-process.
 
 ### 4.2 Hashing at source
 
@@ -303,7 +320,8 @@ Routing is a rule, not a classifier:
 
 - `.csv`, `.jsonl`, `.json` → direct Timesketch import
 - everything else → plaso
-- plaso returns zero events → fall back and flag for a responder
+- plaso returns zero events → fall back and flag for a responder. **Not reachable on the plaso
+  route as built** — see A13
 
 `log2timeline` auto-detects across roughly 200 formats and runs every applicable parser itself.
 The pipeline does not second-guess it. Format coverage includes host artifacts (registry, EVTX,
@@ -353,7 +371,8 @@ The fix is structural:
 
 - The Batch worker image is built **`FROM` the Timesketch image itself, pinned by digest, not
   tag.** Same image, two roles: the worker is the Timesketch image with `log2timeline.py` as its
-  entrypoint instead of `timesketch-worker`. Skew becomes impossible by construction.
+  entrypoint instead of `timesketch-worker`, plus `boto3` installed at build time (A14). plaso is
+  never touched, so skew remains impossible by construction.
 - The ECR mirror pipeline resolves tag→digest **once** and emits a version manifest consumed by
   both the Batch job definition and the appliance's compose file. One source of truth.
 - CI asserts version parity, so a drifted build fails in CI rather than three hours into an
@@ -365,6 +384,18 @@ plaso runs on **AWS Batch, EC2 on-demand** (D14). Given infrequent incidents, a 
 partway through a multi-hour disk image costs more in incident time than the discount saves.
 The compute environment sits at zero desired vCPUs when dormant, so this choice does not affect
 dormant cost.
+
+**Why EC2 rather than Fargate has changed, though the answer has not (A9).** Fargate's old 200 GiB
+ephemeral cap no longer rules it out — it attaches EBS at task launch. The argument that survives
+is I/O: plaso is disk-bound, D8 targets 100 GB to 1 TB per incident, and instance-store NVMe is
+both faster than a per-task network volume and included in the instance price. The cost of that
+choice is Fargate's per-task microVM isolation, which is not nothing for a fleet that processes
+live malware; it is bought back with a job sized to consume a whole instance, so two cases never
+share a kernel, and an IMDS hop limit of 1, so a container cannot reach the instance role.
+
+**The Batch worker is the evidence store's second reader (A12).** It holds `s3:GetObject` on
+evidence, no delete of any kind, and no legal hold. §5.5's asymmetry is a property of the
+*recorder*; nothing enforces anything for a second reader but that reader's own policy.
 
 ### 4.7 Failure handling
 
@@ -567,7 +598,15 @@ Two implementation consequences:
 
 The copy is the one part with a scale limit: it is driven by a function with a 15-minute ceiling,
 so a sufficiently large artifact will exceed it. The limit is documented and the failure is loud
-rather than silent. Phase 3 moves the copy into Batch, which removes it.
+rather than silent.
+
+**An earlier version of this paragraph said Phase 3 would move the copy into Batch. It is
+withdrawn (A10), because it contradicts the rest of this section.** Batch is posture-gated (§3.2),
+so moving the copy there would make *recording* posture-gated: an artifact arriving between
+incidents would sit in intake with a short expiry and no legal hold, its manifest row stuck at
+`recording`, until someone woke the environment. That is precisely the silent gap this section
+exists to prevent. The ceiling stays where it is, raised in place by a tuned multipart transfer and
+the function memory needed to drive it, and measured during acceptance rather than assumed.
 
 ---
 
@@ -713,3 +752,9 @@ earlier reading can tell what moved.
 | A6 | Reactivation has a measured floor of roughly six minutes, set by interface endpoint ENI readiness rather than by the instance. Still "minutes" as D3 promises, but stated rather than discovered (D3, §3.2) | Phase 1 acceptance |
 | A7 | The recorder does hold `s3:GetObject`, scoped to intake. "It never needs `GetObject`" was not achievable: IAM has no `s3:HeadObject` action, so `HeadObject` is authorised by `s3:GetObject`, and `CopyObject` requires read on the source object. The recorder 403'd on `HeadObject` on its first real invocation. The load-bearing property is the asymmetry — read on intake, write-and-lock on evidence, never read on evidence — not a blanket absence (§5.5) | Phase 2 acceptance |
 | A8 | Object Lock protects a **version, not a name**. A plain `DeleteObject` on a versioned bucket writes a delete marker, and S3 permits that on an object under a legal hold — so evidence can be made invisible without being destroyed. The versions themselves are safe: deletion is refused even with `--bypass-governance-retention`, which also establishes that a legal hold outranks the bypass. `s3:DeleteObject` is now denied on both locked buckets, while `s3:DeleteObjectVersion` stays available so §5.2.2 break-glass teardown still works (§5.1, §5.2, §5.2.2) | Phase 2 acceptance |
+| A9 | D14's **reasoning** is replaced, not its conclusion. Batch on EC2 stands, but the recorded ground — that Fargate's 200 GiB ephemeral cap ruled it out — is stale: Fargate attaches EBS at task launch. The live argument is I/O. plaso is disk-bound and D8 targets 100 GB to 1 TB per incident, so scratch is instance-store NVMe rather than a per-task network volume. What EC2 gives up is Fargate's per-task microVM isolation, which matters for a fleet handling live malware; it is bought back with a job sized to a whole instance and an IMDS hop limit of 1 (D14, §4.6) | Phase 3 design |
+| A10 | §5.5's plan to move the intake copy into Batch in Phase 3 is **withdrawn**. Batch is posture-gated (§3.2), so the move would have made *recording* posture-gated — an artifact arriving between incidents would sit in intake with a short expiry and no legal hold, its manifest row stuck at `recording`. That is the silent gap §5.5 and A4 exist to prevent, so the fix contradicted the thing it was fixing. The 900-second ceiling stays, raised in place by a tuned transfer and the function memory to drive it, and measured at acceptance rather than assumed (§5.5) | Phase 3 design |
+| A11 | The pipeline trigger fans out from the **evidence** bucket, not from intake. §4.1's diagram predates the recorder clearing the intake object once it has copied and held it: a pipeline started from intake would race that delete and read a bucket whose contents expire in `intake_expiry_days`. It is also not the only trigger — a scheduled reconciler sweeps the manifest, because an artifact recorded while dormant produced its S3 event while the rule was disabled, and nothing else would ever timeline it (§4.1, §3.2) | Phase 3 design |
+| A12 | The Batch worker is the **second** reader of the evidence store, and the first that legitimately reads it. A7's asymmetry is a property of the *recorder*, not of the bucket, and nothing enforces it for a second reader but that reader's own policy. The worker's policy therefore holds `s3:GetObject` on evidence, no delete of any kind, and no legal hold — stated here because the boundary is invisible from the bucket side (§4.6, §5.5) | Phase 3 design |
+| A13 | §4.3's zero-events fallback **cannot fire on the plaso route as built**, and is recorded here as an open gap rather than a settled change. plaso's `filestat` parser emits three `fs:stat` events for the file it is pointed at — the worker's scratch copy, stamped with processing time — so no single file yields zero events, and every plaso timeline carries three events an analyst can mistake for incident activity. Excluding `filestat` wholesale is not the fix: inside a disk image it is what produces the file-system timestamps. The likely resolution is per-route parser selection, which amends D4 and is left for that decision (§4.3, D4) | Phase 3 acceptance, finding 13 |
+| A14 | The worker image is not the Timesketch image unmodified: the base's `/opt/venv` carries plaso and `requests` but not `boto3`, which is installed at build time, pinned. Parity (§4.5) is unaffected because plaso is not. The image is tagged by base digest **and** a hash of the worker's own source, because the mirror skips any tag that exists and a base-only tag silently skipped every change to the worker (§4.5) | Phase 3 acceptance, defects 6 and 7 |

@@ -14,7 +14,7 @@ internet — plaso workers handle live malware.
 |---|---|---|
 | 1 | Platform, appliance, dormancy toggle | **Built, acceptance-passed** against a real account |
 | 2 | Evidence store: buckets, Object Lock, hashing, manifest, manual ingest | **Built, acceptance-passed** against a real account |
-| 3 | Ingest pipeline: Batch worker, Step Functions, routing | Specified, not started |
+| 3 | Ingest pipeline: Batch worker, Step Functions, routing | **Built, acceptance-run** — 14 of 15 checks pass; one deferred design gap (`NEXT.md`) |
 | 4 | Lifecycle: case close, legal hold, archival, exercise mode | Specified, not started |
 
 ## Where to start

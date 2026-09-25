@@ -14,7 +14,7 @@ data "aws_ami" "al2023" {
 
 # Digest-pinned image references published by the images module (spec 4.5).
 data "aws_ssm_parameter" "image" {
-  for_each = toset(["timesketch", "opensearch", "postgres", "redis"])
+  for_each = toset(["timesketch", "opensearch", "postgres", "redis", "plaso-worker"])
   name     = "${var.image_digest_parameter_prefix}/${each.key}"
 }
 
@@ -41,10 +41,19 @@ locals {
 
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.region}.amazonaws.com"
 
+  # Named once. The Batch job definition, the cloud-init account creation and
+  # LOCAL_AUTH_ALLOWED_USERS must all agree, and three string literals would not.
+  pipeline_user = "pipeline"
+
   timesketch_conf = templatefile("${path.module}/templates/timesketch.conf.tftpl", {
-    secret_key               = random_password.timesketch_secret_key.result
-    postgres_password        = random_password.postgres.result
-    local_auth_allowed_users = join(", ", [for u in var.responders : "'${u}'"])
+    secret_key        = random_password.timesketch_secret_key.result
+    postgres_password = random_password.postgres.result
+    # LOCAL_AUTH_ALLOWED_USERS keeps named local accounts working even when
+    # OIDC is enabled -- it is the break-glass hook if federated ingress is ever
+    # added (spec 3.5). The pipeline account belongs in it for exactly that
+    # reason: an auth change that locked it out would stop every timeline
+    # silently, with the artifacts still arriving and still being recorded.
+    local_auth_allowed_users = join(", ", [for u in concat(var.responders, [local.pipeline_user]) : "'${u}'"])
   })
 
   docker_compose = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
@@ -84,16 +93,11 @@ resource "aws_instance" "appliance" {
     http_endpoint = "enabled"
   }
 
-  user_data = templatefile("${path.module}/templates/cloud-init.sh.tftpl", {
-    data_volume_id                = var.data_volume_id
-    region                        = data.aws_region.current.region
-    ecr_registry                  = local.ecr_registry
-    image_digest_parameter_prefix = var.image_digest_parameter_prefix
-    timesketch_conf               = local.timesketch_conf
-    docker_compose                = local.docker_compose
-    responders                    = var.responders
-    name_prefix                   = var.name_prefix
-  })
+  # Gzipped, because the rendered script -- timesketch.conf and the compose file
+  # embedded in a heavily commented cloud-init -- reached EC2's 16 KB user_data
+  # limit during Phase 3 acceptance. cloud-init recognises gzip natively. Tests
+  # assert on local.cloud_init, the uncompressed text.
+  user_data_base64 = base64gzip(local.cloud_init)
 
   # A changed template means a replaced instance. That is safe here precisely
   # because the data volume belongs to the platform layer: nothing is orphaned
@@ -156,4 +160,19 @@ resource "aws_route53_record" "timesketch" {
   type    = "A"
   ttl     = 60
   records = [aws_instance.appliance.private_ip]
+}
+
+locals {
+  cloud_init = templatefile("${path.module}/templates/cloud-init.sh.tftpl", {
+    data_volume_id                = var.data_volume_id
+    region                        = data.aws_region.current.region
+    ecr_registry                  = local.ecr_registry
+    image_digest_parameter_prefix = var.image_digest_parameter_prefix
+    timesketch_conf               = local.timesketch_conf
+    docker_compose                = local.docker_compose
+    timesketch_image              = data.aws_ssm_parameter.image["timesketch"].value
+    responders                    = var.responders
+    pipeline_user                 = local.pipeline_user
+    name_prefix                   = var.name_prefix
+  })
 }

@@ -174,3 +174,26 @@ run "s3_endpoint_policy_allows_aws_owned_buckets" {
     error_message = "S3 endpoint must allow ECR layer buckets, which are presigned by AWS - otherwise docker pull gets 403."
   }
 }
+
+# Gateway endpoints are route-table entries: free, and unaffected by dormancy.
+# The Batch worker writes timeline_id and event_count to the manifest from
+# inside the VPC, and an interface endpoint for DynamoDB would both bill per ENI
+# and -- living in the analysis layer -- disappear when dormant.
+run "dynamodb_reachable_without_an_interface_endpoint" {
+  command = plan
+
+  assert {
+    condition     = aws_vpc_endpoint.dynamodb.vpc_endpoint_type == "Gateway"
+    error_message = "A DynamoDB interface endpoint would bill per ENI and would be destroyed by dormancy; a gateway endpoint is free and permanent."
+  }
+
+  # Not symmetry with the S3 endpoint for its own sake. Without the condition, a
+  # compromised worker could reach a table in an ATTACKER's account through this
+  # endpoint -- to stage exfiltrated metadata, or to take instructions. D2
+  # isolates this account from the environment under investigation, and that
+  # holds whichever way the bytes flow.
+  assert {
+    condition     = jsondecode(aws_vpc_endpoint.dynamodb.policy).Statement[0].Condition.StringEquals["aws:PrincipalAccount"] == data.aws_caller_identity.current.account_id
+    error_message = "An endpoint with no principal condition is usable by any account that can reach it, which undercuts D2's isolation."
+  }
+}

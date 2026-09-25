@@ -9,12 +9,27 @@ Applied in order; each is independent state.
 
 | Layer | Contains | Applied |
 |---|---|---|
-| `platform/` | VPC, KMS, **EBS data volume**, ECR, IAM, private DNS, budget alarm | Once. Rarely again. |
-| `images/` | CodeBuild mirror publishing digest-pinned images to SSM | Once, then whenever upstream versions change |
-| `analysis/` | Appliance, VPC endpoints, secrets. Driven by `posture` | Every dormant/active transition |
+| `platform/` | VPC, KMS, **EBS data volume**, ECR, IAM, private DNS, budget alarm, the evidence store | Once. Rarely again. |
+| `images/` | CodeBuild mirror publishing digest-pinned images to SSM, and building the plaso worker image | Once, then whenever upstream versions or the worker change |
+| `analysis/` | Appliance, VPC endpoints, secrets, the plaso Batch fleet and the ingest pipeline. Driven by `posture` | Every dormant/active transition |
 
 The split is deliberate. The data volume lives in `platform/`, so `tofu destroy` against
 `analysis/` loses no warm data — indices sit on the other side of that boundary.
+
+**Applying `images/` is not enough — run the mirror before `analysis/`.** `tofu apply` in `images/`
+creates the CodeBuild project; the images, and the plaso worker, only exist once a build has run:
+
+```bash
+cd images && tofu apply
+aws codebuild start-build --project-name "$(tofu output -raw mirror_project_name)"
+```
+
+`analysis/` reads every image digest from SSM at plan time and fails naming the missing parameter
+if the build has not finished. The same holds after changing the worker: rebuild, **then
+re-apply `analysis/`** — the Batch job definition picks up a new digest only when applied.
+
+**Set `pipeline_notification_emails` in `analysis/`.** Pipeline failures publish to an SNS topic;
+with the default empty list nobody is subscribed, and a failed artifact goes unnoticed.
 
 ## Everyday use
 
@@ -81,12 +96,14 @@ was left running.
 
 ## Before touching a real incident
 
-Run **both** acceptance gates end to end. Infrastructure only touched during incidents is
-infrastructure that is broken during incidents.
+Run **all three** acceptance gates end to end against your own deployment. Infrastructure only
+touched during incidents is infrastructure that is broken during incidents — and each gate's first
+run against the development account found defects in code that was CI-green (six, three, twelve).
 
-- `docs/acceptance/phase-1.md` — platform, appliance, dormancy cycle. Passed once already.
-- `docs/acceptance/phase-2.md` — the evidence store. **Never run.** Phase 2 adds four buckets, two
-  DynamoDB tables, a Lambda and a CloudTrail trail to this deployment, and gives the existing CMK
-  an explicit key policy. Cheap, and it does not need the appliance running.
+- `docs/acceptance/phase-1.md` — platform, appliance, dormancy cycle.
+- `docs/acceptance/phase-2.md` — the evidence store. Cheap, and it does not need the appliance
+  running.
+- `docs/acceptance/phase-3.md` — the ingest pipeline, upload to timeline. Not cheap: it needs the
+  appliance, eleven interface endpoints and real Batch instances. Budget an afternoon.
 
-`../../NEXT.md` is the current state of both.
+`../../NEXT.md` is the current state.

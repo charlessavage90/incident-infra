@@ -40,6 +40,12 @@ variable "responders" {
   default     = []
 }
 
+variable "pipeline_notification_emails" {
+  type        = list(string)
+  description = "Notified when an artifact is timelined, flagged for triage, or fails."
+  default     = []
+}
+
 data "terraform_remote_state" "platform" {
   backend = "local"
   config  = { path = "../platform/terraform.tfstate" }
@@ -69,6 +75,17 @@ module "analysis" {
   private_zone_name               = local.p.private_zone_name
   image_digest_parameter_prefix   = "/${local.p.name_prefix}/images"
 
+  # Phase 3. The evidence store itself lives in the platform layer and is never
+  # posture-gated; what the analysis layer holds is the compute that reads it.
+  evidence_bucket     = local.p.evidence_bucket
+  evidence_bucket_arn = local.p.evidence_bucket_arn
+  plaso_bucket        = local.p.plaso_bucket
+  plaso_bucket_arn    = local.p.plaso_bucket_arn
+  artifacts_table     = local.p.artifacts_table
+  artifacts_table_arn = local.p.artifacts_table_arn
+
+  pipeline_notification_emails = var.pipeline_notification_emails
+
   tags = {
     Environment = "development"
   }
@@ -84,4 +101,16 @@ output "appliance_instance_id" {
 
 output "responder_secret_ids" {
   value = module.analysis.responder_secret_ids
+}
+
+output "state_machine_arn" {
+  value = module.analysis.state_machine_arn
+}
+
+output "job_queue_arn" {
+  value = module.analysis.job_queue_arn
+}
+
+output "pipeline_topic_arn" {
+  value = module.analysis.pipeline_topic_arn
 }

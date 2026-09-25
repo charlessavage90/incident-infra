@@ -27,6 +27,8 @@ variables {
     postgres   = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/postgres"
     redis      = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/redis"
     nginx      = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/nginx"
+    # Built, not mirrored -- see modules/platform/ecr.tf.
+    "plaso-worker" = "111122223333.dkr.ecr.us-east-1.amazonaws.com/ir-test/plaso-worker"
   }
   kms_key_arn    = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
   tooling_bucket = "ir-test-tooling-111122223333"
@@ -151,5 +153,91 @@ run "mirror_brings_in_docker_compose" {
   assert {
     condition     = strcontains(aws_iam_role_policy.mirror.policy, "ir-test-tooling-111122223333")
     error_message = "The mirror must be able to write to the tooling bucket."
+  }
+}
+
+# The worker's base is a DIGEST resolved in the same build, not a tag.
+#
+# This asserts the SHAPE of the build, which is what is checkable offline: the
+# buildspec passes a build argument rather than hardcoding a FROM. That the
+# resulting image actually carries the same plaso as the appliance can only be
+# confirmed by an acceptance run -- see docs/acceptance/phase-3.md check 3.
+run "worker_image_takes_its_base_as_a_build_argument" {
+  command = plan
+
+  assert {
+    condition     = strcontains(one(aws_codebuild_project.mirror.source).buildspec, "--build-arg TIMESKETCH_BASE=")
+    error_message = "A hardcoded FROM would let the worker's plaso drift from the appliance's, which spec 4.5 exists to prevent."
+  }
+
+  assert {
+    condition     = strcontains(one(aws_codebuild_project.mirror.source).buildspec, "/images/plaso-worker")
+    error_message = "The analysis job definition reads the worker digest from this SSM path; the build must publish it."
+  }
+}
+
+# Uploaded rather than heredoc'd into the buildspec: templatefile() would eat
+# every ${...} in the Python.
+run "worker_sources_are_staged_in_the_tooling_bucket" {
+  command = plan
+
+  assert {
+    condition     = length(aws_s3_object.worker_source) == 3
+    error_message = "The build context needs worker.py, timesketch_client.py and the Dockerfile."
+  }
+}
+
+# The build fetches that context with `aws s3 cp --recursive`, which lists
+# before it copies. mock_provider cannot know ListObjectsV2 is authorised on the
+# bucket ARN rather than the object ARN -- Phase 3 acceptance found it (defect 1).
+run "mirror_can_list_the_worker_build_context" {
+  command = plan
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(aws_iam_role_policy.mirror.policy).Statement :
+      s.Action == "s3:ListBucket" && s.Resource == "arn:aws:s3:::${var.tooling_bucket}"
+    ])
+    error_message = "Without s3:ListBucket on the tooling bucket, `aws s3 cp --recursive` fails with AccessDenied and no worker image is built."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(aws_iam_role_policy.mirror.policy).Statement :
+      s.Action != "s3:ListBucket" || try(s.Condition.StringLike["s3:prefix"], null) == ["plaso-worker/src/*"]
+    ])
+    error_message = "ListBucket should be scoped to the worker build-context prefix, not the whole tooling bucket."
+  }
+}
+
+# The mirror skips any tag that exists. A tag keyed on the base digest alone
+# hid every change to the worker's own source -- Phase 3 acceptance (defect 7)
+# staged a fixed Dockerfile and the build kept the broken image.
+run "worker_tag_changes_when_its_source_changes" {
+  command = plan
+
+  assert {
+    condition     = strcontains(one(aws_codebuild_project.mirror.source).buildspec, "-src-$WORKER_SOURCE_HASH")
+    error_message = "Without the source hash in the tag, an edited worker.py or Dockerfile is skipped as already built."
+  }
+
+  assert {
+    condition = anytrue([
+      for e in one(aws_codebuild_project.mirror.environment).environment_variable :
+      e.name == "WORKER_SOURCE_HASH" && length(e.value) == 12
+    ])
+    error_message = "The build needs the source hash OpenTofu computed from the files it staged."
+  }
+}
+
+# The Timesketch base has plaso and requests but not boto3 (defect 6). Pinned,
+# because the mirror's build runs with an internet route and an unpinned install
+# would make two builds of one source hash differ.
+run "worker_image_installs_a_pinned_boto3" {
+  command = plan
+
+  assert {
+    condition     = length(regexall("pip install [^\n]*boto3==[0-9.]+", file("${path.module}/../../containers/plaso-worker/Dockerfile"))) == 1
+    error_message = "Every job dies on `import boto3` without it; unpinned, the image stops being a function of its source hash."
   }
 }

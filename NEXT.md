@@ -3,44 +3,41 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-15, after the Phase 2 acceptance run.
+**Last updated:** 2026-09-25, after the Phase 3 acceptance run and the merge of PR #7.
 
 ---
 
 ## State right now
 
-Phases 1 and 2 are built and acceptance-passed against a real AWS account. Phases 3–4 are
-specified in the design but not started.
+Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account.
+**Phase 3 passed 14 of 15 checks.** Check 10 fails on its premise (finding 13, below), deferred
+with a success condition. The run found **twelve defects**, all fixed on the Phase 3 branch with
+regression tests where the property is checkable offline; `docs/acceptance/phase-3.md` has the
+results table and the defect table. Phase 4 is specified but not started.
 
-PRs #1–#4 are merged. **PR #5 is open** — the three defects the Phase 2 acceptance run found,
-each with a regression test. It is a draft until someone reviews it; the fixes are already applied
-to the development account, because the run could not continue without them.
+**Phase 3 is merged to `main`** (PR #7), including all twelve acceptance fixes and this hand-off.
+There are no open PRs. PR #6 (a superseded NEXT.md) was closed unmerged; its branch
+`docs/next-after-merge` still exists on the remote and can be deleted.
 
-**The live development environment is DORMANT and Phase 2 now exists in it.** The appliance was
-never woken for this run — none of the 16 checks needed it. What persists:
+**Local-only state on the owner's machine:** `.claude/settings.local.json` (gitignored) allows
+`tofu -chdir=envs/example/{platform,images,analysis} apply` and denies `tofu destroy`, added so an
+acceptance run could apply reviewed plans. Keep or remove it deliberately.
 
-- VPC, subnets, route tables, security groups, private hosted zone (`ir.internal`)
-- The 100 GB EBS data volume, still attached to the stopped instance, holding a sketch named
-  `acceptance-check` and a Timesketch user `alice`
-- Five ECR repositories with digest-pinned images, and the tooling bucket holding Docker Compose
-- KMS key, IAM role and instance profile, budget alarm (`ir-dev-monthly`, $200)
-- **New:** four evidence-store buckets, two manifest tables, the intake recorder and its log group,
-  and the CloudTrail data-event trail
+**The development environment is DORMANT** and now holds Phases 1–3: everything Phase 2 had, plus
+the worker ECR repository, the DynamoDB gateway endpoint, the Batch fleet (compute environment
+`DISABLED`, queue `ENABLED`), the Step Functions pipeline, both triggers (`DISABLED`), and an
+appliance replaced several times during the run on the same data volume.
 
-What is destroyed while dormant: the eight VPC interface endpoints. The appliance is *stopped*,
-not terminated. **Nothing in Phase 2 is posture-gated**, so the toggle does not touch any of it.
+**Test data left in place, on purpose until the owner decides:**
 
-**The evidence store is empty and the manifest holds no rows.** The acceptance artifacts were
-removed at the end of the run, including the `CASE-TEST-001` case row, so nothing in the account
-is a leftover pretending to be real. The audit bucket keeps its CloudTrail logs, which is the
-point of it.
-
-Cost is effectively unchanged. Phase 2 adds four near-empty buckets, two `PAY_PER_REQUEST` tables
-and a data-event trail — all usage-billed and negligible at rest. The dormant figure is still
-roughly $15/month, dominated by the data volume.
-
-To wake it: `cd envs/example/analysis && tofu apply -var='posture=active' -var='responders=["alice"]'`.
-Expect **roughly six minutes** before SSM is reachable — see the known limitation below.
+- Cases `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` in the cases table, and six manifest
+  rows across them.
+- Their evidence objects, **all under legal hold in GOVERNANCE mode**, including a 5.5 GiB
+  zero-filled `CASE-TEST-005/large.bin` from check 9 — the one worth removing, as the only material
+  storage cost. The matching `.plaso` files are in the plaso bucket (no hold).
+- Timesketch sketches `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` and `acceptance-probe`
+  (a scratch sketch from diagnosing defect 9), alongside Phase 1's `acceptance-check`.
+- Teardown follows `docs/acceptance/phase-3.md`: release each legal hold, then delete **by version**.
 
 Deployment identifiers are not recorded here on purpose (this repo is intended for open-sourcing
 under D1). Discover them with `tofu output` in `envs/example/platform` or
@@ -48,180 +45,111 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ---
 
-## Immediate items
+## Open items, in dependency order
 
-**1. DEFECT — our compose file dropped upstream's healthcheck gating.** Unchanged from the last
-hand-off, and now the only open defect. It is in `modules/analysis`, which both Phase 2 and its
-acceptance run were scoped to leave alone.
+1. **Finding 13 — plaso's `filestat` events.** Every plaso timeline carries three `fs:stat` events
+   of the worker's scratch copy, stamped with processing time; they read as incident activity and
+   make §4.3's zero-events flag unreachable on the plaso route. Excluding `filestat` wholesale is
+   wrong, because inside a disk image it produces the file-system timestamps. *Success
+   condition:* per-route parser selection (single files without `filestat`, images with it) argued
+   as an amendment to D4, and check 10 re-run.
+2. **A re-drive path for `failed` rows.** `failed` is terminal by design; this run re-drove by a
+   conditional `failed → recorded` update plus a custody note, four times — the exact command is
+   under *Operating the pipeline* in `CLAUDE.md`. *Success condition:* an
+   `irctl` re-drive command, or the procedure in an operator runbook. Natural to fold into the
+   Phase 4 `irctl` work alongside item 5.
+3. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
+   failure this run notified nobody. Configuration, not code — but a silent failure path is the
+   thing this design keeps paying to avoid.
+4. **Tear down the test data** above, or decide to keep it. At minimum the 5.5 GiB object.
+5. **`irctl` has no `posture` subcommand**, which spec §7 promises. Decide whether §7's CLI
+   surface is still the intent before Phase 4 builds `case close`.
+6. **Whether the tooling-bucket Snyk lows merit a scoped `.snyk` ignore.** Unchanged judgement
+   call. Scans at the end of this run: platform 13 lows, analysis and images 0 at medium or above,
+   Snyk Code 0 — but re-run rather than trust these.
+7. **CloudTrail → CloudWatch Logs** (`SNYK-CC-TF-256`). Fold into Phase 4's alerting.
+8. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
+   attribution.
 
-At the pinned `20260630` tag, upstream gives `opensearch`, `postgres` and `redis` healthchecks and
-has `timesketch-web` and `timesketch-worker` wait on `depends_on: condition: service_healthy`.
-`modules/analysis/templates/docker-compose.yml.tftpl` uses plain list-form `depends_on`, so
-Timesketch starts when those containers *start*, not when they are *ready*. OpenSearch takes tens
-of seconds to become ready; `restart: always` retries until it works, which is why Phase 1
-acceptance passed and why this is noisy rather than fatal.
+**One verification gap from the run.** Defect 4's fix (retrying cloud-init's endpoint calls) was
+re-verified only on its provisioning half. The race it fixes needs interface endpoints and a
+replacement appliance created in the same apply, which no later apply reproduced. The next
+dormant→active cycle that also replaces the appliance is the test; read
+`/var/log/cloud-init-output.log` for `attempt N of 10` lines.
 
-It is plausibly a contributor to the reactivation floor below, though the endpoint ENI race is the
-measured cause and this has not been separated from it.
+---
 
-*Success condition:* the three backing services carry upstream's healthchecks, web and worker gate
-on `service_healthy`, and one activation shows no restart-loop entries for either container in
-`docker compose logs`. Needs a real activation to verify, which costs money and wakes the
-environment — hence the owner's call on when, not whether.
+## Deferred in Phase 3, deliberately, so nobody goes looking
 
-**Read the compose-pin trap in `CLAUDE.md` before touching that file.** Re-syncing toward upstream
-is safe; bumping the Compose pin is safe; doing both is not, and neither looks dangerous alone.
-
-**2. Review and merge PR #5.** Three fixes, three regression tests, already applied to the
-development account. Nothing is blocked on it, but `main` does not currently contain code that
-the deployed environment is running.
+- **No legal hold on derived `.plaso` files.** A `.plaso` is reproducible from the evidence object,
+  which *is* held, so holding derived artifacts adds a teardown step for no integrity gain and
+  pre-empts Phase 4, where retention and holds are set coherently at case close (§5.4). The plaso
+  bucket keeps Object Lock enabled so Phase 4 can. *Success condition:* Phase 4's `case close` sets
+  retention on the `.plaso` prefix at the same time as the evidence prefix, or a written argument
+  records why it should not.
+- **The reconciler scans the manifest** rather than using a GSI on `status`. Correct at one row per
+  artifact per case; revisit past roughly 100k rows.
+- **No SQS dead-letter queue**, despite §4.7's wording. The artifact stays in the evidence bucket
+  regardless of outcome and the manifest row is the durable record; a queue holding a copy of the
+  same information would be a component to maintain with no consumer.
+- **Single-AZ interface endpoints, revisited and kept.** The Batch fleet is pinned to the
+  appliance's subnet, so compute is still single-AZ and the original argument holds unchanged.
+  Spanning the fleet across AZs without spanning the endpoints would strand workers in an AZ with
+  no ENI to reach ECR through.
 
 ---
 
 ## Known limitations, not defects
 
 **The reactivation floor** (roughly six minutes, set by interface endpoint ENI readiness) is
-described in full in spec §3.2 and recorded as amendment A6. Not restated here — it is a measured
-fact, not an open item.
+described in spec §3.2 and recorded as amendment A6.
 
 The open *decision* it leaves behind: keeping only the three SSM endpoints alive through dormancy
 would remove the race entirely, at roughly $22/month of dormant cost. **That trade has not been
 taken and nobody has argued for it.** Six minutes is inside D3's promise, so this is a
 cost-versus-convenience call rather than a defect.
 
-Verified across three full dormancy cycles during Phase 1 acceptance; the sketch and user survived
-every one, and the `mkfs` guard never fired.
+Phase 3 adds three more interface endpoints while active (`ecs`, `ecs-agent`, `ecs-telemetry`),
+taking eight to eleven — roughly $22/month more, and only while active.
 
 ---
 
-## What the Phase 2 acceptance run established
+## What Phase 3's design settled
 
-The defect table and the reasoning live in `docs/acceptance/phase-2.md`; the durable facts are in
-`CLAUDE.md` and in spec §12 as amendments A7 and A8. What belongs *here* is the part that should
-change how the next phase is approached:
+Four things the spec left open are now argued in
+`docs/superpowers/plans/2026-09-16-phase-3-ingest-pipeline.md` and recorded as amendments A9–A12.
+Two are worth knowing before reading anything that predates them:
 
-**All three defects were authorisation failures, and `mock_provider` could not have caught any of
-them.** Two were IAM grants whose behaviour depends on how AWS maps an API call to an action —
-`HeadObject` is authorised by `s3:GetObject`, which is why the recorder 403'd on its first real
-invocation. The third was an S3 semantic no plan can model: Object Lock protects a version, not a
-name, so a delete marker can be written over a legal hold.
-
-**Two tests asserted invariants AWS does not implement, and passed.** They are now rewritten to
-assert what is actually true and actually load-bearing. Expect the same class of error in Phase 3,
-where the Batch workers' access paths are new and the S3 endpoint policy condition is waiting.
-
-**What the previous hand-off expected to break did not.** The recorder's cross-bucket `s3.copy`
-worked first time, the CloudTrail trail created cleanly, and the `case-id`/`case_id` metadata
-mismatch it flagged as unverified did not exist. The failures were all one layer below where they
-were predicted.
-
----
-
-## Phase 2 — still open
-
-- **Whether the tooling-bucket Snyk lows now merit a scoped `.snyk` ignore.** The original
-  objection was that a blanket ignore would exempt Phase 2's evidence buckets; those buckets now
-  exist and carry a real compensating control (CloudTrail data events, verified delivering during
-  acceptance). Genuinely a judgement call, not a defect. Currently all 13 lows are left visible
-  with reasoning in the file headers. The count did not move when the two new bucket policies
-  landed — **re-run the scan rather than trusting that number.**
-- **`irctl` has no `posture` subcommand**, which spec §7 promises alongside `upload` and
-  `case open/close`. `scripts/check.sh dormant|active` covers it today. Decide whether §7's CLI
-  surface is still the intent before Phase 4 builds `case close` and the question resurfaces.
-- **CloudTrail is not wired to CloudWatch Logs** (`SNYK-CC-TF-256`). Alarms on evidence access are
-  worth having, but alerting is Phase 4 work (spec §6). Fold it into Phase 4's auto-dormancy nudge
-  rather than doing it standalone.
-
-### Deliberately not built, so nobody goes looking
-
-- **No `irctl case close`.** Phase 4 per §9. Acceptance checks 15 and 16 exercised its S3
-  primitives by hand and both behaved as §5.2 assumes, so that phase does not meet them cold.
-- **The recorder's copy has a 900-second ceiling**, being Lambda-driven. It fails loudly and the
-  object stays in intake. Phase 3 moves the copy into Batch, which removes it.
-- **A sub-second window exists between the copy and the legal hold.** Deliberate — the reasoning is
-  in `_copy_and_hold`. Closing it would mean betting the hold on `CopyObject`'s allowed-argument
-  list, which the managed copy needed above 5 GB does not obviously honour.
-
-### Carried into Phase 3
-
-- **The S3 endpoint policy lesson applies to Phase 3, not Phase 2.** Nothing built in Phase 2
-  reaches the evidence buckets through the VPC endpoint — `irctl` runs on a responder's machine and
-  the recorder runs outside the VPC. The Batch workers are the first thing that will, and any
-  access path that is anonymous or presigned by AWS does **not** carry `aws:PrincipalAccount`. The
-  existing condition denies it with a 403 that names nothing useful. This already broke `dnf` and
-  would have broken `docker pull`.
-- **The development role needs `s3:BypassGovernanceRetention`** or `tofu destroy` fails against any
-  bucket holding locked objects. `AdministratorAccess` covers it; a scoped role would not. Teardown
-  is written out at the end of `docs/acceptance/phase-2.md`, including the part that is not obvious
-  and is now confirmed rather than assumed: **a legal hold is not cleared by the retention bypass**
-  and must be turned off separately.
-- **Break-glass deletion must target a version.** The new bucket policy denies keyed
-  `s3:DeleteObject` outright, so any teardown or cleanup script that omits `--version-id` will now
-  fail with an explicit deny rather than quietly writing a delete marker. The teardown script in
-  the acceptance doc already does this correctly.
-
----
-
-## Phase 3 — ingest pipeline
-
-Batch worker, Step Functions, routing. The most useful things already established:
-
-- **Build the plaso worker image `FROM` the Timesketch image, pinned by digest.** The Timesketch
-  release image already installs `plaso-tools`, so it contains `log2timeline.py` at exactly the
-  version Timesketch will read back. Same image, two roles — the worker is that image with a
-  different entrypoint. This makes the §4.5 version-parity invariant structural rather than a matter
-  of discipline, and it is the phase where the **CI parity assertion** finally has two things to
-  compare.
-- The tooling-mirror path built in Phase 1 (CodeBuild → S3 → checksum-verified install) is the
-  pattern for anything else the worker needs that AL2023 does not package.
-- **Routing is a rule, not a classifier**: `.csv`/`.jsonl`/`.json` go to direct Timesketch import,
-  everything else to `log2timeline`, and zero events falls back to flagging for a responder.
-- **Revisit D14** (Batch on EC2 on-demand). It was chosen partly on the belief that Fargate's
-  200 GiB ephemeral cap ruled it out; Fargate can now attach EBS volumes at task launch and reaches
-  32 vCPU / 244 GB. The on-demand-versus-Spot reasoning still stands on its own.
-- **Revisit the single-AZ endpoint placement** if the Batch fleet spans availability zones. It is
-  currently pinned to the appliance's subnet, which is correct only while compute is single-AZ.
-- **The worker will need `s3:GetObject` on the evidence bucket**, which is the first component in
-  the design that legitimately does. It is worth stating the boundary explicitly when that lands:
-  the recorder's asymmetry (§5.5, amendment A7) is a property of the *recorder*, not a property of
-  the bucket, and nothing enforces it for a second reader.
-
-**Do the Phase 3 acceptance run before Phase 4.** Two for two now: every acceptance run against
-this design has found defects in code that was reviewed, CI-green and looked finished.
-
----
-
-## Phase 4 and deferred work
-
-- **Phase 4**: case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
-  attribution. Exercise mode matters more than it looks — infrastructure only touched during
-  incidents is infrastructure that is broken during incidents.
-- **EBS snapshot ingest** (spec §10) is deferred with the prior art identified. Most disk images
-  arrive as EBS snapshots rather than uploaded files. **libcloudforensics** handles cross-account
-  volume copy including encrypted volumes via temporary CMKs — genuinely fiddly code nobody should
-  rewrite. dfTimewolf wraps it in an `aws_forensics` recipe and its `aws_snapshot_s3_copy` module
-  reconstructs a snapshot into S3, which **collapses that path into the S3 pipeline** rather than
-  adding a second one. dfTimewolf is the wrong *outer* orchestrator (synchronous CLI, no retry or
-  fan-out), which is why Step Functions holds that role (D15).
-- **Normalizers stay deferred** (D5) until a source proves it recurs. Two clean routes exist then:
-  a Timesketch header mapping (no code) or a plaso `DSVParser` subclass (upstreamable).
-- **Open questions from spec §11 still open**: region strategy for data residency, and OpenSearch
-  heap tuning at `r6i.large` measured against a real timeline rather than assumed.
+- **A10 withdraws a promise §5.5 made.** Phase 3 was supposed to move the intake copy into Batch.
+  It does not, because Batch is posture-gated and that would have made *recording* posture-gated —
+  the exact silent gap §5.5 exists to prevent. A remembered reading of §5.5 is wrong on this point.
+- **A9 replaces D14's reasoning without changing its conclusion.** Batch on EC2 still, but because
+  plaso is disk-bound and wants instance-store NVMe, not because of Fargate's old ephemeral cap.
 
 ---
 
 ## Production readiness, when it stops being a sandbox
 
 - **The dedicated IR account must not use the current credential shape.** Development runs on a
-  long-lived IAM access key with `AdministratorAccess` belonging to an unrelated project. D2 and the
-  break-glass property in §3.5 assume IR access survives compromise of everything else; a static
-  admin key on a workstation is exactly the dependency the design exists to remove.
+  long-lived IAM access key with `AdministratorAccess` belonging to an unrelated project. D2 and
+  the break-glass property in §3.5 assume IR access survives compromise of everything else; a
+  static admin key on a workstation is exactly the dependency the design exists to remove.
 - **The public-ALB ingress seam is designed but unbuilt.** Spec §3.5 keeps ingress as a variable
-  with one implemented value so adding it is additive. If it is ever built, the open question is
-  whether Cognito can drive `GOOGLE_OIDC_*` directly or whether an nginx shim mapping
-  `x-amzn-oidc-identity` to `REMOTE_USER` is needed — that was never settled and deserves a spike.
+  with one implemented value so adding it is additive. The open question is whether Cognito can
+  drive `GOOGLE_OIDC_*` directly or whether an nginx shim mapping `x-amzn-oidc-identity` to
+  `REMOTE_USER` is needed — never settled, deserves a spike.
 - **Exercise mode should exist before the first real incident**, not after.
 - **Compliance mode has still never been exercised**, by design — §5.2.1's guard variable is
   implemented and tested, and the development account deliberately runs GOVERNANCE. The first
   production deployment will be the first time that path runs, and it is irreversible. Worth a
   deliberate dry run in a throwaway account before it is used in anger.
+- **EBS snapshot ingest** (spec §10) stays deferred with the prior art identified:
+  **libcloudforensics** for cross-account volume copy including encrypted volumes, and
+  dfTimewolf's `aws_snapshot_s3_copy` to reconstruct a snapshot into S3, which collapses that path
+  into the S3 pipeline rather than adding a second one. dfTimewolf is the wrong *outer*
+  orchestrator (synchronous CLI, no retry or fan-out), which is why Step Functions holds that role
+  (D15).
+- **Normalizers stay deferred** (D5) until a source proves it recurs. Two clean routes exist then:
+  a Timesketch header mapping (no code) or a plaso `DSVParser` subclass (upstreamable).
+- **Open questions from spec §11 still open**: region strategy for data residency, and OpenSearch
+  heap tuning at `r6i.large` measured against a real timeline rather than assumed.

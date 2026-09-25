@@ -1,0 +1,51 @@
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="==IRBOUNDARY=="
+
+--==IRBOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/bash
+# Managed by OpenTofu. Launch-template user data for the plaso worker fleet.
+#
+# --- GOTCHA: MIME multipart is not optional here ---
+#
+# AWS Batch APPENDS its own user data -- the ECS_CLUSTER configuration that
+# joins the instance to the compute environment -- to whatever a launch template
+# supplies. It can only do that if the template's user data is already a MIME
+# multipart archive. A plain shell script is REPLACED rather than merged, and
+# the symptom is silent: instances launch, come up healthy, never join the
+# cluster, and every job sits in RUNNABLE forever with no error in Batch, in
+# ECS, or on the instance.
+set -euxo pipefail
+
+# plaso is disk-bound (amendment A9). Instance-store NVMe is the entire reason
+# these instance families were chosen over Fargate; a worker that quietly fell
+# back to the root EBS volume would be correct and slow, which is the worst
+# thing to be debugging mid-incident. So mount it loudly and say so when it is
+# missing.
+SCRATCH=/scratch
+mkdir -p "$SCRATCH"
+
+# Instance-store devices report a distinct model string. EBS volumes on these
+# instances are ALSO NVMe, so filtering on /dev/nvme* alone would pick up the
+# root volume and mkfs it -- the same class of mistake the appliance's blkid
+# guard exists to prevent.
+mapfile -t EPHEMERAL < <(lsblk -d -n -o NAME,MODEL \
+  | awk '/Instance Storage/ { print "/dev/" $1 }')
+
+if [ "$${#EPHEMERAL[@]}" -eq 0 ]; then
+  echo "WARNING: no instance store on this instance type; scratch falls back to the root volume" >&2
+elif [ "$${#EPHEMERAL[@]}" -eq 1 ]; then
+  mkfs.xfs -f "$${EPHEMERAL[0]}"
+  mount "$${EPHEMERAL[0]}" "$SCRATCH"
+else
+  mdadm --create /dev/md0 --level=0 --raid-devices="$${#EPHEMERAL[@]}" "$${EPHEMERAL[@]}"
+  mkfs.xfs -f /dev/md0
+  mount /dev/md0 "$SCRATCH"
+fi
+
+# The container runs as a non-root user from the Timesketch base image.
+chmod 1777 "$SCRATCH"
+df -h "$SCRATCH"
+
+--==IRBOUNDARY==--
