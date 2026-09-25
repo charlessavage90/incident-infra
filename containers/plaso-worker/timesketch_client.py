@@ -14,6 +14,7 @@ The session is injectable so the tests never open a socket.
 
 import os
 import re
+import time
 
 import requests
 
@@ -36,7 +37,11 @@ class TimesketchClient:
 
     def _check(self, response, what):
         if not 200 <= response.status_code < 300:
-            raise TimesketchError(f"{what}: HTTP {response.status_code}")
+            # The body carries Timesketch's reason. Without it, Phase 3
+            # acceptance's defect 9 logged only "upload: HTTP 400" and had to be
+            # diagnosed by replaying the request by hand on the appliance.
+            detail = (getattr(response, "text", "") or "").strip()[:500]
+            raise TimesketchError(f"{what}: HTTP {response.status_code} {detail}".rstrip())
         return response
 
     def login(self):
@@ -102,15 +107,56 @@ class TimesketchClient:
         with open(path, "rb") as handle:
             response = self._session.post(
                 self._url("/api/v1/upload/"),
-                data={"name": timeline_name, "sketch_id": str(sketch_id)},
+                # total_file_size is not optional: the server defaults it to 0
+                # and rejects 0 as "File is empty" whatever the file holds
+                # (Phase 3 acceptance, defect 9).
+                data={
+                    "name": timeline_name,
+                    "sketch_id": str(sketch_id),
+                    "total_file_size": str(os.path.getsize(path)),
+                },
                 files={"file": (os.path.basename(path), handle)},
                 headers=self._headers(),
                 timeout=self._timeout,
             )
         return _first(self._check(response, "upload").json())["id"]
 
-    def event_count(self, sketch_id, timeline_id):
-        record = _first(
+    def wait_until_indexed(self, sketch_id, timeline_id, sleep=time.sleep, interval=10, attempts=2160):
+        """Block until Timesketch has finished indexing the timeline.
+
+        Upload returns as soon as the file is queued: the datasource reads
+        "queueing" with total_file_events 0, and indexing runs in the
+        timesketch-worker container afterwards. Counting at that point reported
+        zero for every artifact and flagged each one for triage (Phase 3
+        acceptance, defect 10).
+
+        The default bound is six hours, half the Batch job's twelve-hour
+        attempt_duration_seconds, leaving room for the download and upload
+        around it.
+        """
+        for attempt in range(attempts):
+            record = self._timeline(sketch_id, timeline_id)
+            states = [_latest_status(record)] + [
+                _latest_status(ds) for ds in record.get("datasources", [])
+            ]
+            if "fail" in states:
+                reasons = "; ".join(
+                    ds.get("error_message", "") for ds in record.get("datasources", [])
+                    if ds.get("error_message")
+                )
+                raise TimesketchError(
+                    f"timeline {timeline_id} failed to index: {reasons or 'no reason given'}"
+                )
+            if states and all(state == "ready" for state in states):
+                return
+            if attempt < attempts - 1:
+                sleep(interval)
+        raise TimesketchError(
+            f"timeline {timeline_id} not indexed after {attempts} checks; last states {states}"
+        )
+
+    def _timeline(self, sketch_id, timeline_id):
+        return _first(
             self._check(
                 self._session.get(
                     self._url(f"/api/v1/sketches/{sketch_id}/timelines/{timeline_id}/"),
@@ -119,6 +165,9 @@ class TimesketchClient:
                 "read timeline",
             ).json()
         )
+
+    def event_count(self, sketch_id, timeline_id):
+        record = self._timeline(sketch_id, timeline_id)
         # Zero is a legitimate answer -- spec 4.3 flags it for a responder rather
         # than failing the pipeline.
         return sum(ds.get("total_file_events", 0) for ds in record.get("datasources", []))
@@ -126,6 +175,12 @@ class TimesketchClient:
 
 _FORM_TOKEN = re.compile(r'<input[^>]*name="csrf_token"[^>]*value="([^"]+)"')
 _META_TOKEN = re.compile(r'<meta[^>]*name="csrf-token"[^>]*content="([^"]+)"')
+
+
+def _latest_status(record):
+    """Timesketch keeps a status history; the last entry is the current one."""
+    history = record.get("status") or []
+    return history[-1].get("status") if history else None
 
 
 def _csrf_from_page(html):

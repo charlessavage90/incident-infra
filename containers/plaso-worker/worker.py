@@ -181,6 +181,7 @@ def cmd_import(args):
         client = _timesketch()
         sketch_id = client.resolve_sketch(args.case_id)
         timeline_id = client.upload(local, sketch_id, timeline_name(args.key))
+        client.wait_until_indexed(sketch_id, timeline_id)
         count = client.event_count(sketch_id, timeline_id)
 
     record_timeline(args.case_id, args.sha256, timeline_id, count)

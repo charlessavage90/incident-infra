@@ -150,3 +150,73 @@ def test_event_count_of_a_timeline_with_no_datasources_is_zero():
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
 
     assert client.event_count(sketch_id=7, timeline_id=42) == 0
+
+
+# --- Phase 3 acceptance, defects 9 and 10 ---
+#
+# Both shapes below were captured from the pinned release on the appliance.
+
+
+def test_upload_declares_the_file_size():
+    # The server reads total_file_size from the form, defaults it to 0, and
+    # rejects 0 as "Unable to upload file. File is empty" -- whatever was sent.
+    session = FakeSession([FakeResponse(json_data={"objects": [{"id": 42}]})])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    client.upload(__file__, sketch_id=7, timeline_name="triage")
+
+    import os
+    data = session.calls[0][2]["data"]
+    assert data["total_file_size"] == str(os.path.getsize(__file__))
+    assert data["sketch_id"] == "7"
+
+
+def test_errors_carry_the_server_message():
+    body = '{"message": "Unable to upload file. File is empty"}'
+    session = FakeSession([FakeResponse(status_code=400, text=body)])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    with pytest.raises(TimesketchError, match="File is empty"):
+        client.upload(__file__, sketch_id=7, timeline_name="triage")
+
+
+def _timeline(status, events=0, error=""):
+    return FakeResponse(json_data={"objects": [{
+        "status": [{"status": status}],
+        "datasources": [{
+            "status": [{"status": status}],
+            "total_file_events": events,
+            "error_message": error,
+        }],
+    }]})
+
+
+def test_wait_until_indexed_polls_past_queueing_and_processing():
+    # Upload returns while the datasource is still "queueing" with
+    # total_file_events 0. Counting then would flag every artifact as empty.
+    session = FakeSession([_timeline("queueing"), _timeline("processing"), _timeline("ready", 7)])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+    sleeps = []
+
+    client.wait_until_indexed(sketch_id=7, timeline_id=42, sleep=sleeps.append)
+
+    assert len(session.calls) == 3
+    assert len(sleeps) == 2
+
+
+def test_wait_until_indexed_raises_on_fail_with_the_reason():
+    session = FakeSession([_timeline("fail", error="bad header")])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    with pytest.raises(TimesketchError, match="bad header"):
+        client.wait_until_indexed(sketch_id=7, timeline_id=42, sleep=lambda _: None)
+
+
+def test_wait_until_indexed_gives_up_rather_than_hanging():
+    session = FakeSession([_timeline("processing")] * 3)
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    with pytest.raises(TimesketchError, match="not indexed"):
+        client.wait_until_indexed(
+            sketch_id=7, timeline_id=42, sleep=lambda _: None, attempts=3
+        )
