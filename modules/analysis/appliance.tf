@@ -93,17 +93,11 @@ resource "aws_instance" "appliance" {
     http_endpoint = "enabled"
   }
 
-  user_data = templatefile("${path.module}/templates/cloud-init.sh.tftpl", {
-    data_volume_id                = var.data_volume_id
-    region                        = data.aws_region.current.region
-    ecr_registry                  = local.ecr_registry
-    image_digest_parameter_prefix = var.image_digest_parameter_prefix
-    timesketch_conf               = local.timesketch_conf
-    docker_compose                = local.docker_compose
-    responders                    = var.responders
-    pipeline_user                 = local.pipeline_user
-    name_prefix                   = var.name_prefix
-  })
+  # Gzipped, because the rendered script -- timesketch.conf and the compose file
+  # embedded in a heavily commented cloud-init -- reached EC2's 16 KB user_data
+  # limit during Phase 3 acceptance. cloud-init recognises gzip natively. Tests
+  # assert on local.cloud_init, the uncompressed text.
+  user_data_base64 = base64gzip(local.cloud_init)
 
   # A changed template means a replaced instance. That is safe here precisely
   # because the data volume belongs to the platform layer: nothing is orphaned
@@ -166,4 +160,19 @@ resource "aws_route53_record" "timesketch" {
   type    = "A"
   ttl     = 60
   records = [aws_instance.appliance.private_ip]
+}
+
+locals {
+  cloud_init = templatefile("${path.module}/templates/cloud-init.sh.tftpl", {
+    data_volume_id                = var.data_volume_id
+    region                        = data.aws_region.current.region
+    ecr_registry                  = local.ecr_registry
+    image_digest_parameter_prefix = var.image_digest_parameter_prefix
+    timesketch_conf               = local.timesketch_conf
+    docker_compose                = local.docker_compose
+    timesketch_image              = data.aws_ssm_parameter.image["timesketch"].value
+    responders                    = var.responders
+    pipeline_user                 = local.pipeline_user
+    name_prefix                   = var.name_prefix
+  })
 }

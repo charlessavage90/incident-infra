@@ -252,17 +252,17 @@ run "cloud_init_handles_the_three_gotchas" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "vm.max_map_count=262144")
+    condition     = strcontains(local.cloud_init, "vm.max_map_count=262144")
     error_message = "OpenSearch will not start without vm.max_map_count=262144."
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "blkid")
+    condition     = strcontains(local.cloud_init, "blkid")
     error_message = "mkfs MUST be guarded by blkid: cloud-init runs on every boot, and an unguarded format destroys all evidence on the second activation."
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "nvme")
+    condition     = strcontains(local.cloud_init, "nvme")
     error_message = "On Nitro instances the data volume must be resolved by volume ID, not a guessed device path."
   }
 }
@@ -298,7 +298,7 @@ run "appliance_waits_for_vpc_endpoints" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "retry 10 dnf install")
+    condition     = strcontains(local.cloud_init, "retry 10 dnf install")
     error_message = "Package installation must retry; cloud-init runs once and a transient failure is unrecoverable."
   }
 
@@ -306,12 +306,12 @@ run "appliance_waits_for_vpc_endpoints" {
   # its ENI forwards packets. Phase 3 acceptance (defect 4) lost cloud-init to a
   # connect timeout on the first unretried `aws ssm get-parameter`.
   assert {
-    condition     = length(regexall("\\$\\(aws ", aws_instance.appliance.user_data)) == 0
+    condition     = length(regexall("\\$\\(aws ", local.cloud_init)) == 0
     error_message = "Every AWS API call in cloud-init goes through an interface endpoint that may not be forwarding yet; an unretried one fails the whole script."
   }
 
   assert {
-    condition     = length(regexall("\\$\\(retry 10 aws ", aws_instance.appliance.user_data)) >= 3
+    condition     = length(regexall("\\$\\(retry 10 aws ", local.cloud_init)) >= 3
     error_message = "The compose lookups and the secret reads must retry; they are the first calls through the ssm and secretsmanager endpoints."
   }
 }
@@ -329,7 +329,7 @@ run "timesketch_logs_directory_is_mounted" {
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "/mnt/data/logs")
+    condition     = strcontains(local.cloud_init, "/mnt/data/logs")
     error_message = "cloud-init must create the logs directory on the data volume."
   }
 }
@@ -344,7 +344,7 @@ run "responder_passwords_do_not_reach_the_cloud_init_log" {
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "set +x")
+    condition     = strcontains(local.cloud_init, "set +x")
     error_message = "Tracing must be disabled around secret handling or passwords land in cloud-init logs."
   }
 }
@@ -378,12 +378,12 @@ run "ssm_agent_recovers_on_every_reactivation" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "ssm-endpoint-wait.service")
+    condition     = strcontains(local.cloud_init, "ssm-endpoint-wait.service")
     error_message = "A boot-time unit must restart the SSM agent once its endpoint is reachable, or reactivation can take an hour."
   }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "systemctl enable ssm-endpoint-wait.service")
+    condition     = strcontains(local.cloud_init, "systemctl enable ssm-endpoint-wait.service")
     error_message = "The unit must be enabled so it runs on stop/start, not just on first boot."
   }
 }
@@ -440,12 +440,42 @@ run "pipeline_account_password_does_not_reach_the_cloud_init_log" {
   variables { posture = "active" }
 
   assert {
-    condition     = strcontains(aws_instance.appliance.user_data, "${var.name_prefix}/pipeline")
+    condition     = strcontains(local.cloud_init, "${var.name_prefix}/pipeline")
     error_message = "The worker authenticates as a named pipeline account; cloud-init must create it."
   }
 
   assert {
-    condition     = length(regexall("set \\+x", aws_instance.appliance.user_data)) >= 2
+    condition     = length(regexall("set \\+x", local.cloud_init)) >= 2
     error_message = "Every secret fetch must be wrapped in set +x. Responder passwords leaked into cloud-init-output.log until that was added; the pipeline password would too."
+  }
+}
+
+# timesketch.conf names data files that must sit beside it. Without
+# plaso.mappings every .plaso import failed in psort (Phase 3 acceptance,
+# defect 11); CSV imports never read it.
+run "appliance_installs_timesketch_data_files_from_the_pinned_image" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = strcontains(local.cloud_init, "cp -n /opt/venv/share/timesketch/* /out/")
+    error_message = "Without the data files beside timesketch.conf, every .plaso import fails for want of plaso.mappings."
+  }
+
+  assert {
+    condition     = strcontains(local.cloud_init, "test -f /opt/timesketch/etc/plaso.mappings")
+    error_message = "cloud-init should fail loudly at boot, not at the first import, if plaso.mappings is missing."
+  }
+}
+
+# EC2 caps user data at 16 KB. The uncompressed script crossed it in Phase 3
+# acceptance; gzip bought headroom, and this says when that headroom is spent.
+run "appliance_user_data_has_headroom_under_the_ec2_limit" {
+  command = plan
+  variables { posture = "active" }
+
+  assert {
+    condition     = length(aws_instance.appliance.user_data_base64) * 3 / 4 < 12288
+    error_message = "Compressed user data is past 75% of EC2's 16 KB limit. Move the embedded config out of cloud-init (e.g. into the tooling bucket) before it stops applying."
   }
 }

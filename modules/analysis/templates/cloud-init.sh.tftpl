@@ -190,6 +190,18 @@ COMPOSE_EOF
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "${ecr_registry}"
 
+# timesketch.conf is not the whole of /etc/timesketch. It names data files --
+# plaso.mappings, tags.yaml, context_links.yaml and the rest -- that upstream's
+# deploy script copies alongside it. Without plaso.mappings every .plaso import
+# fails in psort ("No such OpenSearch mappings file"); CSV imports do not read
+# it, which is why the gap survived until Phase 3 acceptance (defect 11).
+#
+# Copied from the SAME digest-pinned image rather than fetched from upstream, so
+# the data files cannot drift from the code that reads them (spec 4.5's
+# argument, applied to config). cp -n keeps the timesketch.conf written above.
+docker run --rm --entrypoint sh -v /opt/timesketch/etc:/out "${timesketch_image}" -c 'cp -n /opt/venv/share/timesketch/* /out/'
+test -f /opt/timesketch/etc/plaso.mappings
+
 cd /opt/timesketch
 docker compose up -d
 
