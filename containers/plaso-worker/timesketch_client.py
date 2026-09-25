@@ -13,6 +13,7 @@ The session is injectable so the tests never open a socket.
 """
 
 import os
+import re
 
 import requests
 
@@ -39,21 +40,33 @@ class TimesketchClient:
         return response
 
     def login(self):
-        """Fetch the login form for its CSRF cookie, then post credentials."""
+        """Fetch the login form for its CSRF token, then post credentials.
+
+        The token is in the page, not in a cookie: the pinned release renders it
+        as a hidden `csrf_token` form field and a `csrf-token` meta tag, and sets
+        only a `session` cookie. Reading a cookie failed every login in Phase 3
+        acceptance (defect 8). Upstream's timesketch_api_client reads the form
+        field the same way.
+        """
         form = self._session.get(self._url("/login/"), timeout=self._timeout)
-        token = form.cookies.get("csrf_token")
+        token = _csrf_from_page(form.text)
         if not token:
             raise TimesketchError(
-                "no CSRF token on the login form. Timesketch sets csrf_token as a "
-                "cookie on GET /login/; its absence usually means the web container "
-                "is up but not yet ready."
+                "no CSRF token on the login form: neither the csrf_token form field "
+                f"nor the csrf-token meta tag was present (HTTP {form.status_code}). "
+                "If the page is not Timesketch's login form, the web container may "
+                "not be ready yet."
             )
         self._csrf = token
 
         self._check(
             self._session.post(
                 self._url("/login/"),
-                data={"username": self._username, "password": self._password},
+                data={
+                    "username": self._username,
+                    "password": self._password,
+                    "csrf_token": token,
+                },
                 headers={"X-CSRFToken": token},
                 timeout=self._timeout,
             ),
@@ -109,6 +122,19 @@ class TimesketchClient:
         # Zero is a legitimate answer -- spec 4.3 flags it for a responder rather
         # than failing the pipeline.
         return sum(ds.get("total_file_events", 0) for ds in record.get("datasources", []))
+
+
+_FORM_TOKEN = re.compile(r'<input[^>]*name="csrf_token"[^>]*value="([^"]+)"')
+_META_TOKEN = re.compile(r'<meta[^>]*name="csrf-token"[^>]*content="([^"]+)"')
+
+
+def _csrf_from_page(html):
+    """The form field first, as upstream's client does; the meta tag otherwise."""
+    for pattern in (_FORM_TOKEN, _META_TOKEN):
+        match = pattern.search(html or "")
+        if match:
+            return match.group(1)
+    return None
 
 
 def _flatten(objects):

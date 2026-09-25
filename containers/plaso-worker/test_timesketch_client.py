@@ -10,11 +10,11 @@ from timesketch_client import TimesketchClient, TimesketchError
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, json_data=None, cookies=None):
+    def __init__(self, status_code=200, json_data=None, cookies=None, text=""):
         self.status_code = status_code
         self._json = json_data if json_data is not None else {}
         self.cookies = cookies or {}
-        self.text = ""
+        self.text = text
 
     def json(self):
         return self._json
@@ -42,9 +42,20 @@ class FakeSession:
         return self._next("POST", url, **kwargs)
 
 
-def test_login_sends_the_csrf_token_it_was_given():
+# The shape of GET /login/ on the pinned Timesketch release, captured from the
+# appliance during Phase 3 acceptance. The token is in the HTML -- a hidden form
+# field and a meta tag -- and the only cookie is `session`. An earlier version
+# read a csrf_token COOKIE, which this release never sets (defect 8).
+LOGIN_PAGE = (
+    '<html><head><meta name="csrf-token" content="meta-tok"/></head><body>'
+    '<form><input id="csrf_token" name="csrf_token" type="hidden" value="form-tok">'
+    "</form></body></html>"
+)
+
+
+def test_login_sends_the_token_from_the_login_form():
     session = FakeSession([
-        FakeResponse(cookies={"csrf_token": "tok-123"}),
+        FakeResponse(cookies={"session": "s"}, text=LOGIN_PAGE),
         FakeResponse(200),
     ])
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
@@ -55,11 +66,22 @@ def test_login_sends_the_csrf_token_it_was_given():
     assert method == "POST"
     assert url == "http://ts:5000/login/"
     assert kwargs["data"]["username"] == "pipeline"
-    assert kwargs["headers"]["X-CSRFToken"] == "tok-123"
+    assert kwargs["data"]["csrf_token"] == "form-tok"
+    assert kwargs["headers"]["X-CSRFToken"] == "form-tok"
 
 
-def test_login_without_a_csrf_cookie_fails_loudly():
-    session = FakeSession([FakeResponse(cookies={})])
+def test_login_falls_back_to_the_meta_tag():
+    page = '<html><head><meta name="csrf-token" content="meta-tok"/></head></html>'
+    session = FakeSession([FakeResponse(text=page), FakeResponse(200)])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    client.login()
+
+    assert session.calls[1][2]["headers"]["X-CSRFToken"] == "meta-tok"
+
+
+def test_login_without_a_csrf_token_fails_loudly():
+    session = FakeSession([FakeResponse(cookies={"session": "s"}, text="<html></html>")])
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
 
     with pytest.raises(TimesketchError, match="CSRF"):
