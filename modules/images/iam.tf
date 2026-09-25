@@ -78,6 +78,20 @@ resource "aws_iam_role_policy" "mirror" {
         Resource = "arn:aws:s3:::${var.tooling_bucket}/*"
       },
       {
+        # `aws s3 cp --recursive` fetches the worker's build context by listing
+        # the prefix first, and ListObjectsV2 is authorised on the BUCKET ARN,
+        # not the object ARN above. Without this the build fails at AccessDenied
+        # on ListBucket (Phase 3 acceptance, defect 1). Scoped to the context
+        # prefix so the role still cannot enumerate the rest of the bucket.
+        Sid      = "ListWorkerBuildContext"
+        Effect   = "Allow"
+        Action   = "s3:ListBucket"
+        Resource = "arn:aws:s3:::${var.tooling_bucket}"
+        Condition = {
+          StringLike = { "s3:prefix" = ["${local.worker_source_prefix}/*"] }
+        }
+      },
+      {
         Sid      = "KmsUse"
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]

@@ -186,3 +186,26 @@ run "worker_sources_are_staged_in_the_tooling_bucket" {
     error_message = "The build context needs worker.py, timesketch_client.py and the Dockerfile."
   }
 }
+
+# The build fetches that context with `aws s3 cp --recursive`, which lists
+# before it copies. mock_provider cannot know ListObjectsV2 is authorised on the
+# bucket ARN rather than the object ARN -- Phase 3 acceptance found it (defect 1).
+run "mirror_can_list_the_worker_build_context" {
+  command = plan
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(aws_iam_role_policy.mirror.policy).Statement :
+      s.Action == "s3:ListBucket" && s.Resource == "arn:aws:s3:::${var.tooling_bucket}"
+    ])
+    error_message = "Without s3:ListBucket on the tooling bucket, `aws s3 cp --recursive` fails with AccessDenied and no worker image is built."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(aws_iam_role_policy.mirror.policy).Statement :
+      s.Action != "s3:ListBucket" || try(s.Condition.StringLike["s3:prefix"], null) == ["plaso-worker/src/*"]
+    ])
+    error_message = "ListBucket should be scoped to the worker build-context prefix, not the whole tooling bucket."
+  }
+}
