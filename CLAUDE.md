@@ -28,16 +28,23 @@ changing anything structural:
   real run exposed
 - `docs/acceptance/phase-2.md` — the Phase 2 gate, plus a table of the three defects its first
   real run exposed
-- `docs/acceptance/phase-3.md` — the Phase 3 gate. **Written, not yet run.**
+- `docs/acceptance/phase-3.md` — the Phase 3 gate, its results, and a table of the twelve
+  defects its first real run exposed
 
-Phases 1 and 2 are complete and acceptance-passed against a real AWS account. **Phase 3 is built
-but has not had its acceptance run** — CI-green is not the same claim. Phase 4 (lifecycle) is
-specified but not built.
+Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account. Phase 3
+passed 14 of 15 checks; **check 10 fails on its premise** (finding 13 in the acceptance doc — plaso's
+`filestat` events), which is deferred with a success condition rather than fixed. Phase 4
+(lifecycle) is specified but not built.
 
 **Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
 Phase 1's acceptance run found six defects in code that looked finished; Phase 2's found three,
-all of them authorisation failures that `mock_provider` cannot see. Assume the next phase behaves
-the same way.
+all of them authorisation failures that `mock_provider` cannot see; Phase 3's found **twelve**. Four
+were authorisation or timing failures of the same kind. Eight were **contract failures against
+Timesketch** — what its image contains, how it issues a CSRF token, which upload fields it
+requires, that it indexes asynchronously — and every Python test was green throughout, because the
+fakes encoded the same wrong beliefs as the code. **A fake is only as good as the capture behind
+it:** where a worker test now pins upstream behaviour, its fixture was captured from the appliance.
+Assume the next phase behaves the same way.
 
 The design document carries an **§12 Amendments** table. Twelve corrections have been made in
 place rather than in a parallel errata file; read §12 before trusting a remembered reading of that
@@ -95,7 +102,7 @@ python -m venv .venv                                  # .venv/ is gitignored
 cd cli && python -m pytest tests -v                                     # irctl, 16
 cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
 cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
-cd containers/plaso-worker && python -m pytest -v                       # worker, 23
+cd containers/plaso-worker && python -m pytest -v                       # worker, 33
 ```
 
 The worker suite needs `requests` as well as `boto3` and `pytest`; see
@@ -106,13 +113,13 @@ The worker suite needs `requests` as well as `boto3` and `pytest`; see
 
 | Suite | Count |
 |---|---|
-| `modules/platform` | 51 run blocks |
-| `modules/images` | 9 |
-| `modules/analysis` | 42 |
+| `modules/platform` | 52 run blocks |
+| `modules/images` | 12 |
+| `modules/analysis` | 45 |
 | `cli` | 16 tests |
 | `modules/platform/lambda/intake` | 8 tests |
 | `modules/analysis/lambda/pipeline` | 20 tests |
-| `containers/plaso-worker` | 23 tests |
+| `containers/plaso-worker` | 33 tests |
 
 **Posture toggle** (applies real infrastructure, costs money):
 
@@ -223,8 +230,10 @@ is `DISABLED` when dormant — so an artifact arriving between incidents would s
 7-day expiry and no legal hold, its manifest row stuck at `recording`, until someone woke the
 environment. The ceiling is raised in place instead: a tuned `TransferConfig` in `handler.py` **and**
 2 GB of function memory, because Lambda scales network bandwidth with memory and neither change
-does anything without the other. The real ceiling is a measurement, not a number to write down —
-`docs/acceptance/phase-3.md` check 9 takes it.
+does anything without the other. **Measured in Phase 3 acceptance: 5.5 GiB filed in 10.17 s**
+(multipart path, 116 MB of 2,048 MB used), about 554 MiB/s, which extrapolates linearly to
+**~480 GiB** inside the 900 s timeout. One measurement at one size; an order of magnitude, not a
+guarantee.
 
 **`irctl` is configured entirely from environment variables** so it holds no state:
 `IR_INTAKE_BUCKET`, `IR_CASES_TABLE`, `IR_RETENTION_YEARS` — each a `tofu output` from
@@ -365,10 +374,28 @@ never join the cluster, and every job sits in `RUNNABLE` with no error in Batch,
 instance. Missing `ecs` / `ecs-agent` / `ecs-telemetry` endpoints produce the identical symptom, so
 check both.
 
-**The worker image is tagged by its base digest, not by `timesketch_version`.** The mirror's
-idempotency rule is "tag exists, skip", and a version-tagged worker would let that rule hide a
-stale base — the exact mechanism that left `postgres:13.0-alpine` in the development account after
-the pin moved. A new base is always a new tag, so the skip stays honest.
+**The worker image is tagged `ts-<base digest>-src-<source hash>`, not by `timesketch_version`.**
+The mirror's idempotency rule is "tag exists, skip", and a version-tagged worker would let that rule
+hide a stale base — the exact mechanism that left `postgres:13.0-alpine` in the development account
+after the pin moved. **The base is only half of what goes into the image:** a tag keyed on it alone
+skipped every change to `worker.py` and the Dockerfile, which is how a fixed worker nearly failed to
+ship (Phase 3 defect 7). The source hash is computed by OpenTofu from the files it stages.
+
+**Batch uses its service-linked role, and the CMK names Auto Scaling's.** No `service_role` on the
+compute environment: a custom role created in the same apply lost an IAM propagation race and the
+environment went `INVALID` with no retry. And the fleet's encrypted root volumes are launched by
+`AWSServiceRoleForAutoScaling`, which the key policy must allow explicitly — otherwise every
+instance dies before `InService` with `Client.InvalidKMSKey.InvalidState`, naming neither. Those
+statements use `Principal "*"` pinned by `aws:PrincipalArn`, because KMS rejects a policy naming a
+principal that does not exist, and that role only exists after an account's first Auto Scaling use.
+A test requires any wildcard principal in the key policy to carry that pin.
+
+**The compute environment carries `name_prefix`, not `name`.** It is `create_before_destroy`, and
+Batch names are unique; a fixed name makes every replacement fail.
+
+**The appliance's user data is gzipped and near a hard limit.** It crossed EC2's 16 KB cap when
+Phase 3 added the data-file copy. A test fails at 75% of the limit; past that, move the embedded
+config out of cloud-init rather than trimming comments.
 
 **The worker is the evidence store's second reader, and A7's asymmetry does not protect it
 (A12).** That asymmetry is a property of the *recorder*, not of the bucket. The worker's job role
@@ -431,6 +458,13 @@ All verified against upstream sources during design; each shaped a decision.
   `azure_activity_log`, `gcp_log`, and `microsoft_audit_log`. So plaso covers more cloud than
   expected — but **no Okta, no Entra sign-in logs, no Google Workspace**.
 - `log2timeline` auto-detects, so the pipeline routes by extension rather than classifying (D4).
+- **Its `filestat` parser emits three `fs:stat` events for the file it was pointed at** — here the
+  worker's scratch copy, stamped with processing time. So no single file ever yields zero events,
+  and every plaso timeline carries three events an analyst can mistake for incident activity
+  (Phase 3 finding 13). Excluding `filestat` wholesale is wrong: inside a disk image it is what
+  produces the file-system timestamps.
+- An EVTX record becomes **two** events (`Creation Time`, `Content Modification Time`). plaso's
+  `test_data/evtx/System.evtx` holds 5,009 records and indexes as 10,021 events (2 × 5,009 + 3).
 
 ### Timesketch
 
@@ -450,6 +484,19 @@ All verified against upstream sources during design; each shaped a decision.
   `appliance.tf`, so resizing needs no other change.
 - The API client (`timesketch_api_client`) is **not** installed in the web container. Scripted
   interaction means the REST API with a session cookie and CSRF token.
+- The image's `/opt/venv` carries plaso and `requests` but **not `boto3`**.
+- **The CSRF token is in the login page's HTML** — a hidden `csrf_token` field and a `csrf-token`
+  meta tag. The only cookie `GET /login/` sets is `session`.
+- **`POST /api/v1/upload/` requires `total_file_size`.** It defaults to 0 and 0 is rejected as
+  *"File is empty"*, whatever the file holds.
+- **Upload returns before indexing.** The new datasource reads `queueing` with 0 events; `ready` or
+  `fail` comes later, from the `timesketch-worker` container.
+- **Uploading to an existing timeline name appends a datasource**; it does not replace. Repeated
+  imports duplicate events unless the caller checks first.
+- `timesketch.conf` names data files (`plaso.mappings`, `tags.yaml`, `context_links.yaml`, …) that
+  must sit beside it in `/etc/timesketch`. The image ships them in `/opt/venv/share/timesketch`.
+  Without `plaso.mappings` every `.plaso` import fails in psort; CSV imports never notice.
+- Several timelines share one OpenSearch index; filter on `__ts_timeline_id` to see one.
 
 ### AWS behaviours that drove decisions
 
@@ -579,6 +626,9 @@ Every one of these cost real time.
   the script locally, base64-encode it, and send one command:
   `echo <b64> | base64 -d > /root/x.sh && bash /root/x.sh`.
 - Results come from `aws ssm get-command-invocation` and need roughly 20–25 seconds after sending.
+- **Write the script to a file on the instance, then run it with `</dev/null`** — never
+  `... | base64 -d | bash`. `docker compose exec -T` inherits the script's stdin and swallows every
+  line after it, and the command reports `Success` with empty output.
 
 ## Repository workflow
 

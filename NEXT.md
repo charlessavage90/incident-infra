@@ -3,36 +3,36 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-16, after Phase 3 was built.
+**Last updated:** 2026-09-25, after the Phase 3 acceptance run.
 
 ---
 
 ## State right now
 
-Phases 1 and 2 are built and acceptance-passed against a real AWS account. **Phase 3 is built and
-has not been run against one.** Phase 4 is specified but not started.
+Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account.
+**Phase 3 passed 14 of 15 checks.** Check 10 fails on its premise (finding 13, below), deferred
+with a success condition. The run found **twelve defects**, all fixed on the Phase 3 branch with
+regression tests where the property is checkable offline; `docs/acceptance/phase-3.md` has the
+results table and the defect table. Phase 4 is specified but not started.
 
-**Two open PRs, both waiting on the owner.** `gh pr list` is the authority; at the time of writing:
+**One open PR: #7, Phase 3.** Marked ready for review after the run. Merging is the owner's call.
+PR #6 (a superseded NEXT.md) was closed; its branch `docs/next-after-merge` still exists.
 
-- **#6** — a docs-only NEXT.md update from the last session. Note the seam it contains: it says
-  "there is no open branch", which was true when written and false the moment it became a PR. This
-  file supersedes it, so merging or closing it are both reasonable.
-- **#7** — Phase 3, a draft. It branches off `origin/main`, so it does not conflict with #6.
-  **Leave it a draft until the acceptance run.** §9's gate is "upload triggers timeline creation
-  with no manual step", and only a real apply shows that.
+**The development environment is DORMANT** and now holds Phases 1–3: everything Phase 2 had, plus
+the worker ECR repository, the DynamoDB gateway endpoint, the Batch fleet (compute environment
+`DISABLED`, queue `ENABLED`), the Step Functions pipeline, both triggers (`DISABLED`), and an
+appliance replaced several times during the run on the same data volume.
 
-**The live development environment is still DORMANT and still holds Phase 1 and 2 only.** Nothing
-in this session was applied. What persists is unchanged from the last hand-off:
+**Test data left in place, on purpose until the owner decides:**
 
-- VPC, subnets, route tables, security groups, private hosted zone (`ir.internal`)
-- The 100 GB EBS data volume, holding a sketch named `acceptance-check` and a Timesketch user
-  `alice`
-- Five ECR repositories with digest-pinned images, and the tooling bucket holding Docker Compose
-- KMS key, IAM role and instance profile, budget alarm (`ir-dev-monthly`, $200)
-- The four evidence-store buckets, both manifest tables, the intake recorder, CloudTrail
-
-**The evidence store is empty and the manifest holds no rows.** Cost is still roughly $15/month
-dormant, dominated by the data volume.
+- Cases `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` in the cases table, and six manifest
+  rows across them.
+- Their evidence objects, **all under legal hold in GOVERNANCE mode**, including a 5.5 GiB
+  zero-filled `CASE-TEST-005/large.bin` from check 9 — the one worth removing, as the only material
+  storage cost. The matching `.plaso` files are in the plaso bucket (no hold).
+- Timesketch sketches `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` and `acceptance-probe`
+  (a scratch sketch from diagnosing defect 9), alongside Phase 1's `acceptance-check`.
+- Teardown follows `docs/acceptance/phase-3.md`: release each legal hold, then delete **by version**.
 
 Deployment identifiers are not recorded here on purpose (this repo is intended for open-sourcing
 under D1). Discover them with `tofu output` in `envs/example/platform` or
@@ -40,53 +40,37 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ---
 
-## The one thing that matters next
-
-**Run the Phase 3 acceptance gate: `docs/acceptance/phase-3.md`.** It is written, with fifteen
-checks and a defect table waiting to be filled in.
-
-Unlike Phase 2's, this run is **not cheap and not short**. It needs the appliance awake, eleven
-interface endpoints, and a Batch fleet launching real `i4i`/`c6id` instances. Budget an afternoon
-and expect to pay for it. Set `posture=dormant` again at the end even if it is abandoned midway.
-
-The order matters and is easy to get wrong: **the image mirror must run before the analysis layer
-applies**, because the Batch job definition reads `/<prefix>/images/plaso-worker` and a missing
-parameter fails the apply naming the path.
-
-**Expect defects. Two runs for two.** Phase 1 found six, Phase 2 found three, and all three of
-Phase 2's were authorisation failures `mock_provider` cannot see. The four most likely here are
-listed at the top of the acceptance doc; the common thread is that three of them **fail silently**
-rather than loudly — missing ECS endpoints and a non-multipart launch template both leave jobs in
-`RUNNABLE` with nothing anywhere saying why.
-
-Two checks in that document are worth calling out because they close items rather than just
-verifying them:
-
-- **Check 5** is the success condition this file has carried since Phase 1 acceptance: the compose
-  healthcheck defect. The fix is in (upstream's healthchecks verbatim, `service_healthy` gating on
-  both web and worker, Compose pin untouched); only an activation can confirm the restart loop is
-  gone.
-- **Check 9** measures the recorder's copy ceiling instead of assuming it. Write the figure into
-  `CLAUDE.md` afterwards — amendment A10 turned that from a number into a measurement.
-
----
-
 ## Open items, in dependency order
 
-1. **Phase 3 acceptance** — above. Everything else waits on it.
-2. **Whether the tooling-bucket Snyk lows merit a scoped `.snyk` ignore.** Unchanged judgement
-   call. Phase 3 adds a good deal of new infrastructure, so **re-run the scan rather than trusting
-   any count written down** — including the "13 lows" this file used to quote. `snyk_iac_scan` now
-   needs running on `modules/analysis` too, which has never been scanned and now carries IAM, a
-   launch template and a state machine. `snyk_code_scan` covers `cli`,
-   `modules/platform/lambda`, `modules/analysis/lambda` and `containers/plaso-worker`.
-3. **`irctl` has no `posture` subcommand**, which spec §7 promises alongside `upload` and
-   `case open/close`. `scripts/check.sh dormant|active` covers it today. Decide whether §7's CLI
-   surface is still the intent before Phase 4 builds `case close` and the question resurfaces.
-4. **CloudTrail is not wired to CloudWatch Logs** (`SNYK-CC-TF-256`). Fold into Phase 4's alerting
-   rather than doing it standalone.
-5. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case
-   cost attribution.
+1. **Review and merge PR #7.** The owner's call. Everything below builds on it.
+2. **Finding 13 — plaso's `filestat` events.** Every plaso timeline carries three `fs:stat` events
+   of the worker's scratch copy, stamped with processing time; they read as incident activity and
+   make §4.3's zero-events flag unreachable on the plaso route. Excluding `filestat` wholesale is
+   wrong, because inside a disk image it produces the file-system timestamps. *Success
+   condition:* per-route parser selection (single files without `filestat`, images with it) argued
+   as an amendment to D4, and check 10 re-run.
+3. **A re-drive path for `failed` rows.** `failed` is terminal by design; this run re-drove by a
+   conditional `failed → recorded` update plus a custody note, four times. *Success condition:* an
+   `irctl` re-drive command, or the procedure in an operator runbook. Natural to fold into the
+   Phase 4 `irctl` work alongside item 6.
+4. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
+   failure this run notified nobody. Configuration, not code — but a silent failure path is the
+   thing this design keeps paying to avoid.
+5. **Tear down the test data** above, or decide to keep it. At minimum the 5.5 GiB object.
+6. **`irctl` has no `posture` subcommand**, which spec §7 promises. Decide whether §7's CLI
+   surface is still the intent before Phase 4 builds `case close`.
+7. **Whether the tooling-bucket Snyk lows merit a scoped `.snyk` ignore.** Unchanged judgement
+   call. Scans at the end of this run: platform 13 lows, analysis and images 0 at medium or above,
+   Snyk Code 0 — but re-run rather than trust these.
+8. **CloudTrail → CloudWatch Logs** (`SNYK-CC-TF-256`). Fold into Phase 4's alerting.
+9. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
+   attribution.
+
+**One verification gap from the run.** Defect 4's fix (retrying cloud-init's endpoint calls) was
+re-verified only on its provisioning half. The race it fixes needs interface endpoints and a
+replacement appliance created in the same apply, which no later apply reproduced. The next
+dormant→active cycle that also replaces the appliance is the test; read
+`/var/log/cloud-init-output.log` for `attempt N of 10` lines.
 
 ---
 

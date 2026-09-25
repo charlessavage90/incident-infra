@@ -106,12 +106,55 @@ delete as ordinary versioned objects.
 
 Finish with `tofu apply -var='posture=dormant'` in `envs/example/analysis`.
 
+## Results
+
+Run 2026-09-24/25 against the development account. **14 of 15 checks pass; check 10 fails on its
+premise** (finding 13 below). Twelve defects, each fixed on the Phase 3 branch (PR #7), with a
+regression test wherever the property is checkable offline.
+
+| # | Result | Evidence |
+|---|---|---|
+| 1 | Pass | 4 added / 2 changed / 0 destroyed: worker repository, DynamoDB gateway endpoint, evidence notification |
+| 2 | Pass (after defects 1, 7) | `ir-dev/plaso-worker@sha256:...`, tag `ts-5d2db4bd966d-src-<hash>` |
+| 3 | Pass | Appliance and worker both `plaso - log2timeline version 20260512` |
+| 4 | Pass (after defects 2, 3) | 11 interface endpoints `available`; compute environment `ENABLED`/`VALID` |
+| 5 | Pass | Backing services `healthy` ~21 s before web and worker start; `restarts=0` on all five; no connection errors. Held again on a stop/start reactivation. **Closes the item NEXT.md carried since Phase 1** |
+| 6 | Pass (after defects 4-6, 8-12) | Upload to `timelined` in **34 s** with no manual step (the section 9 gate). `sample.evtx` is plaso's own `test_data/evtx/System.evtx`, 5,009 records per plaso's parser test, and indexed as **10,021 events**: 2 per record (`Creation Time`, `Content Modification Time`) + 3 `fs:stat` (finding 13) |
+| 7 | Pass | CSV went `import-*` only, no `timeline-*`; `timelined`, 2 events |
+| 8 | Pass | Uploaded while dormant: `recorded`, legal hold `ON`, no execution. On reactivation the sweep had it `timelining` before the apply returned; `timelined` 4 min after active |
+| 9 | Pass, **measured** | 5.5 GiB (multipart copy path, 704 parts) filed in **10.17 s** at 2,048 MB configured / 116 MB used, about 554 MiB/s. Linear extrapolation to the 900 s timeout: **~480 GiB**. One measurement; treat it as an order of magnitude |
+| 10 | **Fail, on premise** | 1 MB of random bytes reached `timelined` with **3 events**, not `needs_triage`. The three are `fs:stat` records of the worker's own scratch copy. See finding 13 |
+| 11 | Pass | A hand-started duplicate execution with identical input ended `Claimed` then `AlreadyHandled`; one timeline, one datasource |
+| 12 | Pass, by natural failure | Terminating a job was not needed: four real failures took the same `States.TaskFailed` catch. Row `failed`, SNS publish succeeded, evidence object intact with matching SHA-256 and legal hold `ON` |
+| 13 | Pass | IAM policy simulator as the worker role against the live bucket policy: `DeleteObject` **explicitDeny** (bucket policy); `DeleteObjectVersion`, `PutObjectLegalHold`, `PutObjectRetention`, `BypassGovernanceRetention`, `PutObject` **implicitDeny** (role); `GetObject` allowed |
+| 14 | Pass | Compute environment `DISABLED`, both rules `DISABLED`, queue `ENABLED`, 0 instances, 0 interface endpoints, appliance `stopped` |
+| 15 | Pass | All sketches and timelines present after the dormant/active cycle, each with exactly one datasource |
+
 ## Defects found
 
-*Filled in after the run.*
+| # | Defect | Fix |
+|---|---|---|
+| 1 | Mirror build failed: `AccessDenied` on `s3:ListBucket` for the tooling bucket. `aws s3 cp --recursive` lists before it copies, and `ListObjectsV2` is authorised on the **bucket** ARN; the role only named `bucket/*` | `ListWorkerBuildContext` statement, scoped by `s3:prefix` to `plaso-worker/src/*` |
+| 2 | Compute environment went `INVALID`: the Batch service role was not authorised for `ecs:DescribeClusters`. The policy was correct and attached a second earlier; this was an **IAM propagation race**. `depends_on` was already in place and cannot close it, and Batch never re-validates | `service_role` omitted, so Batch uses its account-wide service-linked role, which it creates on first use. Two resources removed |
+| 3 | Replacing that environment could never succeed: `create_before_destroy` with a **fixed name**, and Batch names are unique | `name_prefix` |
+| 4 | cloud-init died on its first `aws ssm get-parameter` (`Connect timeout on endpoint URL`), leaving an appliance with no Timesketch. Endpoints and a replacement instance were created in one apply, and the endpoint reported `available` before its ENI forwarded packets: GOTCHA 4's race, hitting the script instead of the agent | Every endpoint call in cloud-init goes through `retry`. **Only the provisioning half is re-verified**: the race needs endpoints and a replacement in the same apply, which later applies did not reproduce |
+| 5 | Every Batch instance was terminated before `InService` with `Client.InvalidKMSKey.InvalidState`, and jobs sat in `RUNNABLE`. Fleet volumes use the CMK and are launched by `AWSServiceRoleForAutoScaling`, whose AWS-managed permissions the root statement never reaches. The error names neither the key nor the role: the third instance of this pattern after CloudTrail and CloudWatch Logs | AWS's documented pair of key-policy statements, pinned by `aws:PrincipalArn` rather than naming the role, because KMS rejects a policy naming a principal that does not exist yet and this role exists only after an account's first Auto Scaling use |
+| 6 | Every job died on `import boto3`. The Dockerfile assumed the Timesketch base carried it; `/opt/venv` has plaso and `requests` only. Its argument against `RUN` was also wrong: the build runs in CodeBuild, outside the VPC | `pip install boto3==1.43.94` at build time, pinned to the version the tests use |
+| 7 | The fix for 6 could not ship: the worker was tagged by **base digest alone** and the mirror skips existing tags, so any change to the worker's own source was silently skipped | The tag carries a hash of the staged worker sources: `ts-<base>-src-<hash>` |
+| 8 | Every login failed with `no CSRF token`. The client read a `csrf_token` **cookie**; this release renders the token in the login HTML (a hidden field and a meta tag) and sets only `session`. The error blamed readiness, pointing diagnosis the wrong way | Token read from the form field, as `timesketch_api_client` does, with the meta tag as fallback. The test fixture is the page captured from the appliance |
+| 9 | Every upload returned `HTTP 400`. The server reads `total_file_size` from the form, defaults it to 0 and rejects 0 as *"File is empty"*. The log said only `upload: HTTP 400`; diagnosed by replaying the request inside the web container | Field sent; errors now carry the response body |
+| 10 | Found in the same replay: upload returns while the datasource is `queueing` with 0 events, and the worker counted immediately, so every artifact would have been flagged `needs_triage` | Poll until the datasource reads `ready`; raise on `fail` with Timesketch's reason; bounded at 6 h, half the job timeout |
+| 11 | Every `.plaso` import failed in psort: `No such OpenSearch mappings file: /etc/timesketch/plaso.mappings`. cloud-init wrote `timesketch.conf` but none of the data files it names, and CSV imports never read them | Data files copied at boot from the **same digest-pinned image** (`cp -n` keeps our conf). That pushed user data past EC2's 16 KB limit, which the provider caught at plan, so user data is now `base64gzip`'d, with a test at 75% of the limit |
+| 12 | Re-importing to a same-named timeline **appends** a datasource. Every retry duplicated the events (one timeline held 10,021 events four times over), `event_count` summed them, and a stale `fail` sank later clean attempts | Import is idempotent, reusing a finished import of the same file, and waiting and counting read only the datasource this upload created |
 
-| # | Defect | Root cause | Fix |
-|---|---|---|---|
+**The pattern held a third time, and widened.** Phase 2's three defects were authorisation failures
+`mock_provider` cannot see. Phase 3 has four of those (1, 2, 5, and the timing in 4), but eight are
+**contract failures against a real upstream**: what the Timesketch image contains (6), how its login
+page issues a token (8), which form fields its upload handler requires (9), that it indexes
+asynchronously (10), what files its config expects (11), and how it treats a repeated upload (12).
+Every Python test was green throughout, because the fakes encoded the same wrong beliefs as the code.
+Where a test now pins one of these, its fixture was **captured from the appliance**, not written
+from memory.
 
 ## Known gaps at this phase
 
@@ -123,5 +166,21 @@ Finish with `tofu apply -var='posture=dormant'` in `envs/example/analysis`.
   time as the evidence prefix, or a written argument records why it should not.
 - **The reconciler scans the manifest.** Fine at one row per artifact per case; revisit with a GSI
   on `status` past roughly 100k rows.
+- **Finding 13: every plaso timeline carries three `fs:stat` events of the worker's scratch copy**,
+  stamped with processing time at a path like `/scratch/tmpnfebi8n3/sample.bin`. An analyst can
+  mistake them for incident activity, and they make §4.3's zero-events signal unreachable on the
+  plaso route, which is check 10's failure. **Deliberately not fixed during the run:**
+  `--parsers '!filestat'` would also strip the file-system timestamps *inside* disk images, which
+  are among the most valuable events plaso produces. *Success condition:* parser selection per
+  route (single files without `filestat`, images with it) argued as an amendment to D4, and
+  check 10 re-run.
+- **No supported re-drive of a `failed` row.** `failed` is terminal by design (the claim accepts
+  only `recorded` or a stale `timelining`), so an artifact whose failure has been fixed stays
+  un-timelined. This run re-drove by a conditional `failed` to `recorded` update with a custody
+  note. *Success condition:* an `irctl` re-drive command, or that procedure written into an
+  operator runbook.
+- **Failure notifications reach nobody in the example environment.** `pipeline_notification_emails`
+  defaults to `[]`, the topic has no subscribers, and every failure this run published to an empty
+  topic. Set it before real use.
 - **Per-case cost attribution** is §6 and Phase 4. Batch resources carry `local.common_tags` like
   everything else, so the retrofit is not made harder.
