@@ -109,15 +109,15 @@ def test_resolve_sketch_creates_one_when_absent():
     assert session.calls[1][0] == "POST"
 
 
-def test_upload_returns_the_timeline_id():
+def test_upload_returns_the_timeline_and_the_datasource_it_created():
+    # Re-uploading to a same-named timeline APPENDS a datasource, so the one
+    # this upload created is the newest, not the only one.
     session = FakeSession([
-        FakeResponse(json_data={"objects": [{"id": 42}]}),
+        FakeResponse(json_data={"objects": [{"id": 42, "datasources": [{"id": 3}, {"id": 38}]}]}),
     ])
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
 
-    timeline_id = client.upload(__file__, sketch_id=7, timeline_name="triage")
-
-    assert timeline_id == 42
+    assert client.upload(__file__, sketch_id=7, timeline_name="triage") == (42, 38)
 
 
 def test_upload_rejects_a_non_2xx_without_inventing_a_timeline():
@@ -128,16 +128,20 @@ def test_upload_rejects_a_non_2xx_without_inventing_a_timeline():
         client.upload(__file__, sketch_id=7, timeline_name="triage")
 
 
-def test_event_count_reads_the_timeline_record():
+def test_event_count_reads_only_its_own_datasource():
+    # Summing every datasource counted each re-import again (defect 12).
     session = FakeSession([
-        FakeResponse(json_data={"objects": [{"id": 42, "datasources": [{"total_file_events": 1337}]}]}),
+        FakeResponse(json_data={"objects": [{"id": 42, "datasources": [
+            {"id": 3, "total_file_events": 10021},
+            {"id": 38, "total_file_events": 10021},
+        ]}]}),
     ])
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
 
-    assert client.event_count(sketch_id=7, timeline_id=42) == 1337
+    assert client.event_count(sketch_id=7, timeline_id=42, datasource_id=38) == 10021
 
 
-def test_event_count_of_a_timeline_with_no_datasources_is_zero():
+def test_event_count_of_an_empty_datasource_is_zero():
     """Zero is a real answer, not an error.
 
     Spec 4.3 falls back and flags for a responder when plaso produced nothing.
@@ -145,11 +149,11 @@ def test_event_count_of_a_timeline_with_no_datasources_is_zero():
     artifact would be reported as broken rather than as empty.
     """
     session = FakeSession([
-        FakeResponse(json_data={"objects": [{"id": 42, "datasources": []}]}),
+        FakeResponse(json_data={"objects": [{"id": 42, "datasources": [{"id": 38, "total_file_events": 0}]}]}),
     ])
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
 
-    assert client.event_count(sketch_id=7, timeline_id=42) == 0
+    assert client.event_count(sketch_id=7, timeline_id=42, datasource_id=38) == 0
 
 
 # --- Phase 3 acceptance, defects 9 and 10 ---
@@ -180,15 +184,21 @@ def test_errors_carry_the_server_message():
         client.upload(__file__, sketch_id=7, timeline_name="triage")
 
 
-def _timeline(status, events=0, error=""):
-    return FakeResponse(json_data={"objects": [{
+def _timeline(status, events=0, error="", stale_failure=False):
+    datasources = [{
+        "id": 38,
         "status": [{"status": status}],
-        "datasources": [{
-            "status": [{"status": status}],
+        "total_file_events": events,
+        "error_message": error,
+    }]
+    if stale_failure:
+        datasources.insert(0, {
+            "id": 3,
+            "status": [{"status": "fail"}],
             "total_file_events": events,
-            "error_message": error,
-        }],
-    }]})
+            "error_message": "an earlier attempt",
+        })
+    return FakeResponse(json_data={"objects": [{"status": [{"status": status}], "datasources": datasources}]})
 
 
 def test_wait_until_indexed_polls_past_queueing_and_processing():
@@ -198,7 +208,7 @@ def test_wait_until_indexed_polls_past_queueing_and_processing():
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
     sleeps = []
 
-    client.wait_until_indexed(sketch_id=7, timeline_id=42, sleep=sleeps.append)
+    client.wait_until_indexed(sketch_id=7, timeline_id=42, datasource_id=38, sleep=sleeps.append)
 
     assert len(session.calls) == 3
     assert len(sleeps) == 2
@@ -209,7 +219,7 @@ def test_wait_until_indexed_raises_on_fail_with_the_reason():
     client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
 
     with pytest.raises(TimesketchError, match="bad header"):
-        client.wait_until_indexed(sketch_id=7, timeline_id=42, sleep=lambda _: None)
+        client.wait_until_indexed(sketch_id=7, timeline_id=42, datasource_id=38, sleep=lambda _: None)
 
 
 def test_wait_until_indexed_gives_up_rather_than_hanging():
@@ -218,5 +228,57 @@ def test_wait_until_indexed_gives_up_rather_than_hanging():
 
     with pytest.raises(TimesketchError, match="not indexed"):
         client.wait_until_indexed(
-            sketch_id=7, timeline_id=42, sleep=lambda _: None, attempts=3
+            sketch_id=7, timeline_id=42, datasource_id=38, sleep=lambda _: None, attempts=3
         )
+
+
+# --- Phase 3 acceptance, defect 12 ---
+#
+# Every retry -- Batch's own and every re-drive -- appended another datasource
+# to the same-named timeline: duplicate events, and an old `fail` that sank
+# every later attempt.
+
+
+def test_an_earlier_failed_datasource_does_not_fail_this_import():
+    session = FakeSession([_timeline("ready", 7, stale_failure=True)])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    client.wait_until_indexed(sketch_id=7, timeline_id=42, datasource_id=38, sleep=lambda _: None)
+
+
+def _sketch(timelines):
+    return FakeResponse(json_data={"objects": [{"id": 7, "timelines": timelines}]})
+
+
+def test_find_ready_import_reuses_a_completed_datasource():
+    session = FakeSession([
+        _sketch([{"id": 42, "name": "triage"}]),
+        FakeResponse(json_data={"objects": [{"id": 42, "datasources": [
+            {"id": 3, "original_filename": "x.plaso", "status": [{"status": "fail"}]},
+            {"id": 38, "original_filename": "x.plaso", "status": [{"status": "processing"}, {"status": "ready"}]},
+        ]}]}),
+    ])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    assert client.find_ready_import(7, "triage", "x.plaso") == (42, 38)
+
+
+def test_find_ready_import_ignores_failed_and_unrelated_datasources():
+    session = FakeSession([
+        _sketch([{"id": 42, "name": "triage"}]),
+        FakeResponse(json_data={"objects": [{"id": 42, "datasources": [
+            {"id": 3, "original_filename": "x.plaso", "status": [{"status": "fail"}]},
+            {"id": 5, "original_filename": "other.plaso", "status": [{"status": "ready"}]},
+        ]}]}),
+    ])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    assert client.find_ready_import(7, "triage", "x.plaso") is None
+
+
+def test_find_ready_import_with_no_such_timeline_asks_nothing_more():
+    session = FakeSession([_sketch([{"id": 9, "name": "other"}])])
+    client = TimesketchClient("http://ts:5000", "pipeline", "pw", session=session)
+
+    assert client.find_ready_import(7, "triage", "x.plaso") is None
+    assert len(session.calls) == 1

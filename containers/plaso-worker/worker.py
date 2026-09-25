@@ -180,9 +180,16 @@ def cmd_import(args):
         local = download(bucket, args.key, safe_local_path(workdir, args.key))
         client = _timesketch()
         sketch_id = client.resolve_sketch(args.case_id)
-        timeline_id = client.upload(local, sketch_id, timeline_name(args.key))
-        client.wait_until_indexed(sketch_id, timeline_id)
-        count = client.event_count(sketch_id, timeline_id)
+        name = timeline_name(args.key)
+        # A retry or re-drive of an import that already finished reuses it
+        # rather than indexing the same events a second time (defect 12).
+        found = client.find_ready_import(sketch_id, name, os.path.basename(local))
+        if found:
+            timeline_id, datasource_id = found
+        else:
+            timeline_id, datasource_id = client.upload(local, sketch_id, name)
+            client.wait_until_indexed(sketch_id, timeline_id, datasource_id)
+        count = client.event_count(sketch_id, timeline_id, datasource_id)
 
     record_timeline(args.case_id, args.sha256, timeline_id, count)
     log.info("sketch %s timeline %s: %s events", sketch_id, timeline_id, count)

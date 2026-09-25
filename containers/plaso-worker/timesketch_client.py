@@ -119,41 +119,75 @@ class TimesketchClient:
                 headers=self._headers(),
                 timeout=self._timeout,
             )
-        return _first(self._check(response, "upload").json())["id"]
+        timeline = _first(self._check(response, "upload").json())
+        # Uploading to a timeline that already exists by name APPENDS a
+        # datasource rather than replacing it, so this upload's datasource is
+        # the newest one, not the only one (Phase 3 acceptance, defect 12).
+        created = max((ds["id"] for ds in timeline.get("datasources", [])), default=None)
+        return timeline["id"], created
 
-    def wait_until_indexed(self, sketch_id, timeline_id, sleep=time.sleep, interval=10, attempts=2160):
-        """Block until Timesketch has finished indexing the timeline.
+    def find_ready_import(self, sketch_id, timeline_name, filename):
+        """(timeline_id, datasource_id) of a finished import of this file, or None.
+
+        Makes import idempotent. Batch retries a failed attempt and an operator
+        re-drives a failed row; without this, each one appended the same events
+        to the timeline again (defect 12).
+        """
+        sketch = _first(
+            self._check(
+                self._session.get(self._url(f"/api/v1/sketches/{sketch_id}/"), timeout=self._timeout),
+                "read sketch",
+            ).json()
+        )
+        for timeline in sketch.get("timelines", []):
+            if timeline.get("name") != timeline_name:
+                continue
+            record = self._timeline(sketch_id, timeline["id"])
+            for ds in record.get("datasources", []):
+                if ds.get("original_filename") == filename and _latest_status(ds) == "ready":
+                    return timeline["id"], ds["id"]
+        return None
+
+    def wait_until_indexed(
+        self, sketch_id, timeline_id, datasource_id, sleep=time.sleep, interval=10, attempts=2160
+    ):
+        """Block until Timesketch has finished indexing THIS upload's datasource.
 
         Upload returns as soon as the file is queued: the datasource reads
         "queueing" with total_file_events 0, and indexing runs in the
         timesketch-worker container afterwards. Counting at that point reported
-        zero for every artifact and flagged each one for triage (Phase 3
-        acceptance, defect 10).
+        zero for every artifact (Phase 3 acceptance, defect 10).
+
+        Only the named datasource is read. The timeline may also hold earlier
+        attempts, and an old `fail` there must not fail this one (defect 12).
 
         The default bound is six hours, half the Batch job's twelve-hour
         attempt_duration_seconds, leaving room for the download and upload
         around it.
         """
+        state = None
         for attempt in range(attempts):
-            record = self._timeline(sketch_id, timeline_id)
-            states = [_latest_status(record)] + [
-                _latest_status(ds) for ds in record.get("datasources", [])
-            ]
-            if "fail" in states:
-                reasons = "; ".join(
-                    ds.get("error_message", "") for ds in record.get("datasources", [])
-                    if ds.get("error_message")
-                )
+            ds = self._datasource(sketch_id, timeline_id, datasource_id)
+            state = _latest_status(ds)
+            if state == "fail":
                 raise TimesketchError(
-                    f"timeline {timeline_id} failed to index: {reasons or 'no reason given'}"
+                    f"timeline {timeline_id} datasource {datasource_id} failed to index: "
+                    f"{ds.get('error_message') or 'no reason given'}"
                 )
-            if states and all(state == "ready" for state in states):
+            if state == "ready":
                 return
             if attempt < attempts - 1:
                 sleep(interval)
         raise TimesketchError(
-            f"timeline {timeline_id} not indexed after {attempts} checks; last states {states}"
+            f"timeline {timeline_id} datasource {datasource_id} not indexed after "
+            f"{attempts} checks; last state {state}"
         )
+
+    def _datasource(self, sketch_id, timeline_id, datasource_id):
+        for ds in self._timeline(sketch_id, timeline_id).get("datasources", []):
+            if ds.get("id") == datasource_id:
+                return ds
+        raise TimesketchError(f"timeline {timeline_id} has no datasource {datasource_id}")
 
     def _timeline(self, sketch_id, timeline_id):
         return _first(
@@ -166,11 +200,11 @@ class TimesketchClient:
             ).json()
         )
 
-    def event_count(self, sketch_id, timeline_id):
-        record = self._timeline(sketch_id, timeline_id)
+    def event_count(self, sketch_id, timeline_id, datasource_id):
         # Zero is a legitimate answer -- spec 4.3 flags it for a responder rather
-        # than failing the pipeline.
-        return sum(ds.get("total_file_events", 0) for ds in record.get("datasources", []))
+        # than failing the pipeline. Only this import's datasource is counted;
+        # summing the timeline counted every earlier attempt again (defect 12).
+        return self._datasource(sketch_id, timeline_id, datasource_id).get("total_file_events", 0)
 
 
 _FORM_TOKEN = re.compile(r'<input[^>]*name="csrf_token"[^>]*value="([^"]+)"')
