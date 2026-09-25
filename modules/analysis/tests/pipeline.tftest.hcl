@@ -336,6 +336,17 @@ run "zero_events_is_flagged_not_silently_recorded" {
 
 # The claim function must not be able to start executions, and the sweep must
 # not be able to read evidence. Neither touches S3 at all.
+# create_before_destroy builds the replacement while the original still exists,
+# and Batch compute environment names are unique.
+run "compute_environment_can_be_replaced" {
+  command = plan
+
+  assert {
+    condition     = aws_batch_compute_environment.worker.name_prefix == "ir-test-plaso-"
+    error_message = "With create_before_destroy, a fixed name makes every replacement of the compute environment fail on a name conflict."
+  }
+}
+
 run "neither_pipeline_function_can_reach_the_evidence_store" {
   command = plan
   variables { posture = "active" }

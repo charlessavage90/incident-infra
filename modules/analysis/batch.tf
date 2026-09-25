@@ -54,26 +54,6 @@ resource "aws_vpc_security_group_ingress_rule" "appliance_from_worker" {
 
 # --- Roles ---
 
-resource "aws_iam_role" "batch_service" {
-  name = "${var.name_prefix}-batch-service"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Action    = "sts:AssumeRole"
-      Principal = { Service = "batch.amazonaws.com" }
-    }]
-  })
-
-  tags = local.common_tags
-}
-
-resource "aws_iam_role_policy_attachment" "batch_service" {
-  role       = aws_iam_role.batch_service.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole"
-}
-
 resource "aws_iam_role" "batch_instance" {
   name = "${var.name_prefix}-batch-instance"
 
@@ -214,15 +194,24 @@ resource "aws_launch_template" "worker" {
 }
 
 resource "aws_batch_compute_environment" "worker" {
-  name = "${var.name_prefix}-plaso"
-  type = "MANAGED"
+  # A prefix, not a fixed name, because of create_before_destroy below: the
+  # replacement is created while the original still holds its name, and Batch
+  # names are unique. A fixed name made every replacement fail on the name
+  # conflict (Phase 3 acceptance, defect 3).
+  name_prefix = "${var.name_prefix}-plaso-"
+  type        = "MANAGED"
 
   # Dormancy is a variable, never a destroy (spec 3.2). DISABLED holds the fleet
   # at zero without losing the queue, the job definition, or anything a queued
   # job refers to.
   state = var.posture == "active" ? "ENABLED" : "DISABLED"
 
-  service_role = aws_iam_role.batch_service.arn
+  # No service_role: Batch uses its service-linked role, AWSServiceRoleForBatch,
+  # creating it on first use. A custom role created in the same apply lost an
+  # IAM propagation race -- Batch assumed it before its policy attachment was
+  # visible, and the environment went INVALID on ecs:DescribeClusters with no
+  # retry (Phase 3 acceptance, defect 2). depends_on cannot close that window;
+  # the service-linked role removes it.
 
   compute_resources {
     type = "EC2"
@@ -249,8 +238,6 @@ resource "aws_batch_compute_environment" "worker" {
 
     tags = local.common_tags
   }
-
-  depends_on = [aws_iam_role_policy_attachment.batch_service]
 
   lifecycle {
     create_before_destroy = true
