@@ -320,7 +320,8 @@ Routing is a rule, not a classifier:
 
 - `.csv`, `.jsonl`, `.json` → direct Timesketch import
 - everything else → plaso
-- plaso returns zero events → fall back and flag for a responder
+- plaso returns zero events → fall back and flag for a responder. **Not reachable on the plaso
+  route as built** — see A13
 
 `log2timeline` auto-detects across roughly 200 formats and runs every applicable parser itself.
 The pipeline does not second-guess it. Format coverage includes host artifacts (registry, EVTX,
@@ -370,7 +371,8 @@ The fix is structural:
 
 - The Batch worker image is built **`FROM` the Timesketch image itself, pinned by digest, not
   tag.** Same image, two roles: the worker is the Timesketch image with `log2timeline.py` as its
-  entrypoint instead of `timesketch-worker`. Skew becomes impossible by construction.
+  entrypoint instead of `timesketch-worker`, plus `boto3` installed at build time (A14). plaso is
+  never touched, so skew remains impossible by construction.
 - The ECR mirror pipeline resolves tag→digest **once** and emits a version manifest consumed by
   both the Batch job definition and the appliance's compose file. One source of truth.
 - CI asserts version parity, so a drifted build fails in CI rather than three hours into an
@@ -754,3 +756,5 @@ earlier reading can tell what moved.
 | A10 | §5.5's plan to move the intake copy into Batch in Phase 3 is **withdrawn**. Batch is posture-gated (§3.2), so the move would have made *recording* posture-gated — an artifact arriving between incidents would sit in intake with a short expiry and no legal hold, its manifest row stuck at `recording`. That is the silent gap §5.5 and A4 exist to prevent, so the fix contradicted the thing it was fixing. The 900-second ceiling stays, raised in place by a tuned transfer and the function memory to drive it, and measured at acceptance rather than assumed (§5.5) | Phase 3 design |
 | A11 | The pipeline trigger fans out from the **evidence** bucket, not from intake. §4.1's diagram predates the recorder clearing the intake object once it has copied and held it: a pipeline started from intake would race that delete and read a bucket whose contents expire in `intake_expiry_days`. It is also not the only trigger — a scheduled reconciler sweeps the manifest, because an artifact recorded while dormant produced its S3 event while the rule was disabled, and nothing else would ever timeline it (§4.1, §3.2) | Phase 3 design |
 | A12 | The Batch worker is the **second** reader of the evidence store, and the first that legitimately reads it. A7's asymmetry is a property of the *recorder*, not of the bucket, and nothing enforces it for a second reader but that reader's own policy. The worker's policy therefore holds `s3:GetObject` on evidence, no delete of any kind, and no legal hold — stated here because the boundary is invisible from the bucket side (§4.6, §5.5) | Phase 3 design |
+| A13 | §4.3's zero-events fallback **cannot fire on the plaso route as built**, and is recorded here as an open gap rather than a settled change. plaso's `filestat` parser emits three `fs:stat` events for the file it is pointed at — the worker's scratch copy, stamped with processing time — so no single file yields zero events, and every plaso timeline carries three events an analyst can mistake for incident activity. Excluding `filestat` wholesale is not the fix: inside a disk image it is what produces the file-system timestamps. The likely resolution is per-route parser selection, which amends D4 and is left for that decision (§4.3, D4) | Phase 3 acceptance, finding 13 |
+| A14 | The worker image is not the Timesketch image unmodified: the base's `/opt/venv` carries plaso and `requests` but not `boto3`, which is installed at build time, pinned. Parity (§4.5) is unaffected because plaso is not. The image is tagged by base digest **and** a hash of the worker's own source, because the mirror skips any tag that exists and a base-only tag silently skipped every change to the worker (§4.5) | Phase 3 acceptance, defects 6 and 7 |

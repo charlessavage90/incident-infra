@@ -46,12 +46,13 @@ fakes encoded the same wrong beliefs as the code. **A fake is only as good as th
 it:** where a worker test now pins upstream behaviour, its fixture was captured from the appliance.
 Assume the next phase behaves the same way.
 
-The design document carries an **§12 Amendments** table. Twelve corrections have been made in
+The design document carries an **§12 Amendments** table. Fourteen corrections have been made in
 place rather than in a parallel errata file; read §12 before trusting a remembered reading of that
-document. A1, A3, A4, A7, A8, A10, A11 and A12 changed load-bearing behaviour. A2's open half —
+document. A1, A3, A4, A7, A8, A10, A11, A12 and A14 changed load-bearing behaviour. A2's open half —
 the dropped compose healthchecks — is now fixed. A9 replaces D14's *reasoning* without changing its
 conclusion, and A10 **withdraws** something §5.5 previously promised, so a remembered reading of
-either is likely to be wrong.
+either is likely to be wrong. **A13 is an open gap, not a settled change:** §4.3's zero-events
+fallback cannot fire on the plaso route as built.
 
 ## Commands
 
@@ -230,10 +231,9 @@ is `DISABLED` when dormant — so an artifact arriving between incidents would s
 7-day expiry and no legal hold, its manifest row stuck at `recording`, until someone woke the
 environment. The ceiling is raised in place instead: a tuned `TransferConfig` in `handler.py` **and**
 2 GB of function memory, because Lambda scales network bandwidth with memory and neither change
-does anything without the other. **Measured in Phase 3 acceptance: 5.5 GiB filed in 10.17 s**
-(multipart path, 116 MB of 2,048 MB used), about 554 MiB/s, which extrapolates linearly to
-**~480 GiB** inside the 900 s timeout. One measurement at one size; an order of magnitude, not a
-guarantee.
+does anything without the other. **Measured, not assumed: roughly 480 GiB** fits inside the 900 s
+timeout, extrapolated from one 5.5 GiB copy — an order of magnitude, not a guarantee. The
+measurement itself is `docs/acceptance/phase-3.md` check 9; update it there, not here.
 
 **`irctl` is configured entirely from environment variables** so it holds no state:
 `IR_INTAKE_BUCKET`, `IR_CASES_TABLE`, `IR_RETENTION_YEARS` — each a `tofu output` from
@@ -335,8 +335,9 @@ principal will need the same treatment, and will fail the same uninformative way
 
 **The root statement is the one that cannot be dropped.** An explicit key policy that omits
 `EnableRootAccountAccess` **cannot be edited by anyone**, and the key becomes unusable and
-undeletable except by scheduling deletion. Do not tidy it away. A test asserts all three
-statements.
+undeletable except by scheduling deletion. Do not tidy it away. Tests assert every statement by
+`Sid`: the root statement, the two service statements above, and the two Auto Scaling statements
+described under *The ingest pipeline* below.
 
 ### The ingest pipeline (Phase 3)
 
@@ -437,6 +438,17 @@ is a systemd unit.
    connections. Dormancy destroys the endpoints; on reactivation the agent races ENI readiness,
    loses, logs `entering hibernation due to error`, and backs off **for up to an hour**. Terraform
    `depends_on` does not fix this: the endpoint reports `available` before its ENI forwards packets.
+
+Three more lines added by Phase 3 acceptance, each after a real failure:
+
+5. **Every AWS call through an interface endpoint is wrapped in `retry`.** Guard 4's race also hits
+   cloud-init itself when endpoints and a replacement instance are created in the same apply; an
+   unretried `aws ssm get-parameter` timed out and left an appliance with no Timesketch.
+6. **Timesketch's data files are copied out of the pinned image** into `/opt/timesketch/etc`
+   (`cp -n`, so our `timesketch.conf` survives). Without `plaso.mappings` every `.plaso` import
+   fails in psort.
+7. **The rendered script is near EC2's 16 KB user-data limit**, and is gzipped for that reason.
+   Tests assert on `local.cloud_init`, the uncompressed text, not on the resource attribute.
 
 `set -x` is on throughout, so anything handling a secret must be wrapped in `set +x` / `set -x`.
 Responder passwords leaked into `/var/log/cloud-init-output.log` until that was added.
@@ -597,6 +609,47 @@ Development does not need a dedicated IR account; nothing in phases 1–4 requir
   then the budget alarm is the only signal that the environment was left running.
 - Interface endpoints are the largest active cost — larger than the appliance itself before they
   were narrowed to one AZ.
+
+### Operating the pipeline
+
+Procedures the Phase 3 acceptance run depended on. None is automated yet.
+
+- **Apply reviewed saved plans, never `-auto-approve`.** `tofu -chdir=envs/example/<layer> plan
+  -out=tfplan`, read it, then `tofu -chdir=... apply tfplan`. Claude Code's auto mode refuses a
+  blind apply, and a saved plan is what makes a replacement (the appliance's `user_data`, the
+  compute environment) visible before it happens. `.claude/settings.local.json` on the owner's
+  machine allows `tofu -chdir=envs/example/{platform,images,analysis} apply` and denies `tofu
+  destroy`; it is gitignored and local to that machine.
+- **Changing the worker is three steps, and the third is easy to forget.** Apply `images` (stages
+  the source, updates the tag hash), run the mirror (`aws codebuild start-build --project-name
+  <prefix>-image-mirror`), then **re-apply `analysis`**: the Batch job definition reads the worker
+  digest from SSM at *apply* time, so a rebuilt image does nothing until a new job definition
+  revision is registered. Confirm with `aws batch describe-job-definitions --job-definition-name
+  <prefix>-plaso-worker --status ACTIVE`.
+- **Re-driving a `failed` row** (no command exists yet — NEXT.md): a conditional update back to
+  `recorded`, appending to `custody` so the chain of custody records the operator action, then let
+  the sweep take it:
+
+  ```bash
+  aws dynamodb update-item --table-name <prefix>-artifacts \
+    --key '{"case_id":{"S":"CASE"},"sha256":{"S":"HASH"}}' \
+    --update-expression 'SET #s = :r, custody = list_append(custody, :n)' \
+    --condition-expression '#s = :f' --expression-attribute-names '{"#s":"status"}' \
+    --expression-attribute-values '{":r":{"S":"recorded"},":f":{"S":"failed"},":n":{"L":[{"S":"<utc> re-driven by operator: <why>"}]}}'
+  ```
+
+- **The sweep can be run on demand** rather than waiting `sweep_interval_minutes`:
+  `aws lambda invoke --function-name <prefix>-pipeline-sweep --payload '{}' out.json`. It runs the
+  same code the schedule does and returns `{"started": N}`.
+- **Where to look when an artifact fails.** The manifest row's `status`; the execution history in
+  Step Functions (the `TaskFailed` cause names the log stream); the worker's log group
+  `/aws/batch/<prefix>-plaso-worker`. Worker errors carry Timesketch's response body. If a job sits
+  in `RUNNABLE`, read the Auto Scaling group's scaling activities — defect 5's KMS failure was
+  visible there and nowhere else.
+- **Talking to Timesketch as the pipeline** from the appliance: the password is the
+  `<prefix>/pipeline` secret; log in via `GET /login/`, take the token from the HTML, `POST`
+  credentials with it. The appliance role **cannot read the plaso bucket**, by design — the worker
+  pushes files to Timesketch over the API.
 
 **Local state files contain generated secrets in plaintext.** `envs/example/*/terraform.tfstate`
 holds the `random_password` results. They are gitignored; keep it that way, and do not paste their

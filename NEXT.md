@@ -3,7 +3,7 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-25, after the Phase 3 acceptance run.
+**Last updated:** 2026-09-25, after the Phase 3 acceptance run and the merge of PR #7.
 
 ---
 
@@ -15,8 +15,13 @@ with a success condition. The run found **twelve defects**, all fixed on the Pha
 regression tests where the property is checkable offline; `docs/acceptance/phase-3.md` has the
 results table and the defect table. Phase 4 is specified but not started.
 
-**One open PR: #7, Phase 3.** Marked ready for review after the run. Merging is the owner's call.
-PR #6 (a superseded NEXT.md) was closed; its branch `docs/next-after-merge` still exists.
+**Phase 3 is merged to `main`** (PR #7), including all twelve acceptance fixes and this hand-off.
+There are no open PRs. PR #6 (a superseded NEXT.md) was closed unmerged; its branch
+`docs/next-after-merge` still exists on the remote and can be deleted.
+
+**Local-only state on the owner's machine:** `.claude/settings.local.json` (gitignored) allows
+`tofu -chdir=envs/example/{platform,images,analysis} apply` and denies `tofu destroy`, added so an
+acceptance run could apply reviewed plans. Keep or remove it deliberately.
 
 **The development environment is DORMANT** and now holds Phases 1–3: everything Phase 2 had, plus
 the worker ECR repository, the DynamoDB gateway endpoint, the Batch fleet (compute environment
@@ -42,28 +47,28 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Open items, in dependency order
 
-1. **Review and merge PR #7.** The owner's call. Everything below builds on it.
-2. **Finding 13 — plaso's `filestat` events.** Every plaso timeline carries three `fs:stat` events
+1. **Finding 13 — plaso's `filestat` events.** Every plaso timeline carries three `fs:stat` events
    of the worker's scratch copy, stamped with processing time; they read as incident activity and
    make §4.3's zero-events flag unreachable on the plaso route. Excluding `filestat` wholesale is
    wrong, because inside a disk image it produces the file-system timestamps. *Success
    condition:* per-route parser selection (single files without `filestat`, images with it) argued
    as an amendment to D4, and check 10 re-run.
-3. **A re-drive path for `failed` rows.** `failed` is terminal by design; this run re-drove by a
-   conditional `failed → recorded` update plus a custody note, four times. *Success condition:* an
+2. **A re-drive path for `failed` rows.** `failed` is terminal by design; this run re-drove by a
+   conditional `failed → recorded` update plus a custody note, four times — the exact command is
+   under *Operating the pipeline* in `CLAUDE.md`. *Success condition:* an
    `irctl` re-drive command, or the procedure in an operator runbook. Natural to fold into the
-   Phase 4 `irctl` work alongside item 6.
-4. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
+   Phase 4 `irctl` work alongside item 5.
+3. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
    failure this run notified nobody. Configuration, not code — but a silent failure path is the
    thing this design keeps paying to avoid.
-5. **Tear down the test data** above, or decide to keep it. At minimum the 5.5 GiB object.
-6. **`irctl` has no `posture` subcommand**, which spec §7 promises. Decide whether §7's CLI
+4. **Tear down the test data** above, or decide to keep it. At minimum the 5.5 GiB object.
+5. **`irctl` has no `posture` subcommand**, which spec §7 promises. Decide whether §7's CLI
    surface is still the intent before Phase 4 builds `case close`.
-7. **Whether the tooling-bucket Snyk lows merit a scoped `.snyk` ignore.** Unchanged judgement
+6. **Whether the tooling-bucket Snyk lows merit a scoped `.snyk` ignore.** Unchanged judgement
    call. Scans at the end of this run: platform 13 lows, analysis and images 0 at medium or above,
    Snyk Code 0 — but re-run rather than trust these.
-8. **CloudTrail → CloudWatch Logs** (`SNYK-CC-TF-256`). Fold into Phase 4's alerting.
-9. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
+7. **CloudTrail → CloudWatch Logs** (`SNYK-CC-TF-256`). Fold into Phase 4's alerting.
+8. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
    attribution.
 
 **One verification gap from the run.** Defect 4's fix (retrying cloud-init's endpoint calls) was

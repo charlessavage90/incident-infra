@@ -62,8 +62,22 @@ cd ../analysis
 tofu apply -var='posture=active' -var='responders=["alice"]'
 ```
 
-Test artifacts — a real EVTX with a known event count is worth finding, because check 6 compares
-against it:
+Open the test case first — the recorder refuses an artifact filed against a case that is not open,
+and it stays in intake (`_require_open_case` in the recorder) — and always
+in GOVERNANCE mode outside production:
+
+```bash
+irctl case open CASE-TEST-003 --object-lock-mode GOVERNANCE
+```
+
+Test artifacts. `# finds nothing` below is the premise check 10 turned out not to hold (finding 13).
+For the EVTX, the 2026-09-24 run used plaso's own test fixture, whose parser test
+pins it at 5,009 records; it indexes as **10,021 events** (two per record, plus three `fs:stat` —
+see finding 13):
+
+```bash
+curl -sSfL -o sample.evtx https://raw.githubusercontent.com/log2timeline/plaso/main/test_data/evtx/System.evtx
+```
 
 ```bash
 head -c 1000000 /dev/urandom > sample.bin          # routes to plaso, finds nothing

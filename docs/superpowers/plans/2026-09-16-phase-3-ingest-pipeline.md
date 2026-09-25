@@ -1,5 +1,13 @@
 # Phase 3 — Ingest Pipeline Implementation Plan
 
+> **Executed, then corrected by acceptance.** This plan is the record of what was built and why;
+> its code snippets show the design *before* the acceptance run, which found twelve defects in it.
+> Several snippets are now wrong — among them the custom `batch_service` role (removed; defect 2),
+> the fixed compute-environment `name` (defect 3), the base-digest-only worker tag (defect 7), and
+> the Timesketch client's login, upload and counting (defects 8–10, 12). The code is authoritative;
+> `docs/acceptance/phase-3.md` lists every defect and its fix, and spec §12 A13–A14 record the
+> design consequences. Read the reasoning here; do not copy the snippets.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
