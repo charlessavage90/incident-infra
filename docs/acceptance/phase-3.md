@@ -193,6 +193,8 @@ from memory.
   un-timelined. This run re-drove by a conditional `failed` to `recorded` update with a custody
   note. *Success condition:* an `irctl` re-drive command, or that procedure written into an
   operator runbook.
+  **Closed** by `irctl artifact redrive`, which performs that update and names the caller's ARN
+  in the custody note.
 - **Failure notifications reach nobody in the example environment.** `pipeline_notification_emails`
   defaults to `[]`, the topic has no subscribers, and every failure this run published to an empty
   topic. Set it before real use.

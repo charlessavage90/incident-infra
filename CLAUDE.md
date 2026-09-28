@@ -100,7 +100,7 @@ python -m venv .venv                                  # .venv/ is gitignored
 ./.venv/Scripts/python.exe -m pip install -e "cli[dev]"
 ./.venv/Scripts/python.exe -m pip install boto3 pytest
 
-cd cli && python -m pytest tests -v                                     # irctl, 16
+cd cli && python -m pytest tests -v                                     # irctl, 21
 cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
 cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
 cd containers/plaso-worker && python -m pytest -v                       # worker, 33
@@ -117,7 +117,7 @@ The worker suite needs `requests` as well as `boto3` and `pytest`; see
 | `modules/platform` | 52 run blocks |
 | `modules/images` | 12 |
 | `modules/analysis` | 45 |
-| `cli` | 16 tests |
+| `cli` | 21 tests |
 | `modules/platform/lambda/intake` | 8 tests |
 | `modules/analysis/lambda/pipeline` | 20 tests |
 | `containers/plaso-worker` | 33 tests |
@@ -626,18 +626,10 @@ Procedures the Phase 3 acceptance run depended on. None is automated yet.
   digest from SSM at *apply* time, so a rebuilt image does nothing until a new job definition
   revision is registered. Confirm with `aws batch describe-job-definitions --job-definition-name
   <prefix>-plaso-worker --status ACTIVE`.
-- **Re-driving a `failed` row** (no command exists yet — NEXT.md): a conditional update back to
-  `recorded`, appending to `custody` so the chain of custody records the operator action, then let
-  the sweep take it:
-
-  ```bash
-  aws dynamodb update-item --table-name <prefix>-artifacts \
-    --key '{"case_id":{"S":"CASE"},"sha256":{"S":"HASH"}}' \
-    --update-expression 'SET #s = :r, custody = list_append(custody, :n)' \
-    --condition-expression '#s = :f' --expression-attribute-names '{"#s":"status"}' \
-    --expression-attribute-values '{":r":{"S":"recorded"},":f":{"S":"failed"},":n":{"L":[{"S":"<utc> re-driven by operator: <why>"}]}}'
-  ```
-
+- **Re-driving a `failed` row** once its cause is fixed: `irctl artifact redrive <sha256> --case
+  CASE --reason "<why>"` (needs `IR_ARTIFACTS_TABLE`). It is a conditional `failed → recorded`
+  update that appends a custody note naming the caller's ARN and the reason; the sweep claims it
+  from there. Any state other than `failed` is refused, because it is queued, in flight or done.
 - **The sweep can be run on demand** rather than waiting `sweep_interval_minutes`:
   `aws lambda invoke --function-name <prefix>-pipeline-sweep --payload '{}' out.json`. It runs the
   same code the schedule does and returns `{"started": N}`.
