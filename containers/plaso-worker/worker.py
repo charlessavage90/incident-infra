@@ -110,9 +110,69 @@ def upload(path, bucket, key):
     return key
 
 
+# Amendment A13, resolved as A15. For a single file, plaso's filestat parser
+# stamps three fs:stat events on the worker's own scratch copy -- processing
+# time, not incident time -- which read as incident activity and make the
+# zero-events flag of spec 4.3 unreachable. Inside an image or an archive the
+# same parser produces the file-system and member timestamps, which are among
+# the most valuable events plaso emits, so it is excluded only here.
+#
+# Two elements, not one, and the second is load-bearing. plaso's extraction
+# tool sets force_parser when a single-file source has exactly one enabled
+# parser element, and force_parser runs the usnjrnl parser against every file.
+# usnjrnl only ever applies to $UsnJrnl:$J inside an NTFS image, so excluding it
+# for a single file changes nothing else.
+SINGLE_FILE_PARSERS = "!filestat,!usnjrnl"
+
+
+def source_type(path):
+    """Ask dfvfs what log2timeline will decide the source is.
+
+    This is plaso's own detection asked early, not a classifier of ours: the
+    same SourceScanner log2timeline runs, plus the archive step plaso adds on
+    top of it (a zip, tar or compressed stream is traversed, and its members'
+    timestamps come from filestat). Scanning reads headers and trailers, not the
+    image. dfvfs exists only in the Timesketch image, hence the local import.
+    """
+    from dfvfs.analyzer import analyzer
+    from dfvfs.helpers import source_scanner
+    from dfvfs.lib import definitions
+    from dfvfs.path import factory
+
+    context = source_scanner.SourceScannerContext()
+    context.OpenSourcePath(path)
+    source_scanner.SourceScanner().Scan(context)
+    kind = context.source_type
+    if kind == definitions.SOURCE_TYPE_FILE:
+        spec = factory.Factory.NewPathSpec(definitions.TYPE_INDICATOR_OS, location=path)
+        if analyzer.Analyzer.GetArchiveTypeIndicators(
+            spec
+        ) or analyzer.Analyzer.GetCompressedStreamTypeIndicators(spec):
+            return "archive"
+    return kind
+
+
+def parser_expression(source):
+    """The --parsers value for this source, or None for plaso's own choice.
+
+    None everywhere but a plain single file. Passing any expression for an image
+    would also switch off plaso's per-OS preset selection. A scan that fails
+    keeps filestat: three noise events are recoverable, and losing an image's
+    file-system timestamps is not.
+    """
+    try:
+        kind = source_type(source)
+    except Exception as exc:  # dfvfs raises BackEndError and friends
+        log.warning("source scan failed (%s); leaving parser selection to plaso", exc)
+        return None
+    log.info("source type: %s", kind)
+    return SINGLE_FILE_PARSERS if kind == "file" else None
+
+
 def run_log2timeline(source, destination):
     """log2timeline auto-detects across roughly 200 formats and runs every
-    applicable parser itself. The pipeline does not second-guess it (spec 4.3).
+    applicable parser itself. The pipeline does not second-guess it (spec 4.3),
+    with the one exception parser_expression describes.
     """
     argv = [
         "log2timeline.py",
@@ -121,8 +181,11 @@ def run_log2timeline(source, destination):
         "--volumes", "all",
         "--unattended",
         "--storage_file", destination,
-        source,
     ]
+    parsers = parser_expression(source)
+    if parsers:
+        argv += ["--parsers", parsers]
+    argv.append(source)
     log.info("running %s", " ".join(argv))
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode != 0:

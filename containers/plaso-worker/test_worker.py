@@ -115,6 +115,7 @@ def test_run_log2timeline_passes_the_storage_file_and_the_source(monkeypatch, tm
         return Result()
 
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker, "source_type", lambda path: "archive")
 
     source = str(tmp_path / "triage.zip")
     destination = str(tmp_path / "abc.plaso")
@@ -123,6 +124,62 @@ def test_run_log2timeline_passes_the_storage_file_and_the_source(monkeypatch, tm
     assert captured["argv"][0] == "log2timeline.py"
     assert captured["argv"][-1] == source
     assert destination in captured["argv"]
+    assert "--parsers" not in captured["argv"]
+
+
+def _argv_for(monkeypatch, tmp_path, kind):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return Result()
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker, "source_type", kind)
+    source = str(tmp_path / "in")
+    worker.run_log2timeline(source, str(tmp_path / "out.plaso"))
+    assert captured["argv"][-1] == source
+    return captured["argv"]
+
+
+def test_a_single_file_is_timelined_without_filestat(monkeypatch, tmp_path):
+    """Finding 13 / amendment A15. filestat on a single file stamps three
+    fs:stat events on the worker's scratch copy at processing time: noise an
+    analyst can mistake for incident activity, and the reason spec 4.3's
+    zero-events flag could never fire on the plaso route."""
+    argv = _argv_for(monkeypatch, tmp_path, lambda path: "file")
+    assert argv[argv.index("--parsers") + 1] == "!filestat,!usnjrnl"
+
+
+def test_the_single_file_expression_has_two_elements(monkeypatch, tmp_path):
+    """plaso sets force_parser when a single-file source has exactly ONE parser
+    element, and force_parser runs usnjrnl against every file. '!filestat' alone
+    would trade three noise events for a behaviour change nobody asked for."""
+    assert len(worker.SINGLE_FILE_PARSERS.split(",")) == 2
+
+
+@pytest.mark.parametrize("kind", ["storage media image", "archive", "directory"])
+def test_images_and_archives_keep_plasos_own_parser_choice(monkeypatch, tmp_path, kind):
+    """Inside an image filestat produces the file-system timestamps, and inside
+    a zip the member timestamps; nothing else does. Passing any --parsers for an
+    image would also switch off plaso's per-OS preset selection."""
+    argv = _argv_for(monkeypatch, tmp_path, lambda path: kind)
+    assert "--parsers" not in argv
+
+
+def test_a_failed_source_scan_keeps_filestat(monkeypatch, tmp_path):
+    """Three noise events are recoverable; an image's lost file-system
+    timestamps are not. So an unclassifiable source errs towards keeping them."""
+
+    def boom(path):
+        raise RuntimeError("Unable to open file entry.")
+
+    argv = _argv_for(monkeypatch, tmp_path, boom)
+    assert "--parsers" not in argv
 
 
 def test_main_returns_nonzero_rather_than_raising(monkeypatch):

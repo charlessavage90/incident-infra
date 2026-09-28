@@ -32,8 +32,9 @@ changing anything structural:
   defects its first real run exposed
 
 Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account. Phase 3
-passed 14 of 15 checks; **check 10 fails on its premise** (finding 13 in the acceptance doc — plaso's
-`filestat` events), which is deferred with a success condition rather than fixed. Phase 4
+passed 14 of 15 checks; **check 10 failed on its premise** (finding 13 in the acceptance doc — plaso's
+`filestat` events). The fix (amendment A15) is built and unit-tested but **not yet deployed or
+re-run against the account**, so check 10 is still open. Phase 4
 (lifecycle) is specified but not built.
 
 **Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
@@ -46,13 +47,13 @@ fakes encoded the same wrong beliefs as the code. **A fake is only as good as th
 it:** where a worker test now pins upstream behaviour, its fixture was captured from the appliance.
 Assume the next phase behaves the same way.
 
-The design document carries an **§12 Amendments** table. Fourteen corrections have been made in
+The design document carries an **§12 Amendments** table. Fifteen corrections have been made in
 place rather than in a parallel errata file; read §12 before trusting a remembered reading of that
 document. A1, A3, A4, A7, A8, A10, A11, A12 and A14 changed load-bearing behaviour. A2's open half —
 the dropped compose healthchecks — is now fixed. A9 replaces D14's *reasoning* without changing its
 conclusion, and A10 **withdraws** something §5.5 previously promised, so a remembered reading of
-either is likely to be wrong. **A13 is an open gap, not a settled change:** §4.3's zero-events
-fallback cannot fire on the plaso route as built.
+either is likely to be wrong. A13 recorded that §4.3's zero-events fallback could not fire on the
+plaso route; **A15 resolves it** by parser selection on plaso's own source type, without amending D4.
 
 ## Commands
 
@@ -103,7 +104,7 @@ python -m venv .venv                                  # .venv/ is gitignored
 cd cli && python -m pytest tests -v                                     # irctl, 21
 cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
 cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
-cd containers/plaso-worker && python -m pytest -v                       # worker, 33
+cd containers/plaso-worker && python -m pytest -v                       # worker, 39
 ```
 
 The worker suite needs `requests` as well as `boto3` and `pytest`; see
@@ -120,7 +121,7 @@ The worker suite needs `requests` as well as `boto3` and `pytest`; see
 | `cli` | 21 tests |
 | `modules/platform/lambda/intake` | 8 tests |
 | `modules/analysis/lambda/pipeline` | 20 tests |
-| `containers/plaso-worker` | 33 tests |
+| `containers/plaso-worker` | 39 tests |
 
 **Posture toggle** (applies real infrastructure, costs money):
 
@@ -474,9 +475,16 @@ All verified against upstream sources during design; each shaped a decision.
   worker's scratch copy, stamped with processing time. So no single file ever yields zero events,
   and every plaso timeline carries three events an analyst can mistake for incident activity
   (Phase 3 finding 13). Excluding `filestat` wholesale is wrong: inside a disk image it is what
-  produces the file-system timestamps.
+  produces the file-system timestamps, and inside a zip the member timestamps. The worker therefore
+  excludes it only when dfvfs classifies the source as a plain `file` (A15).
+- **`--parsers` with exactly one element on a single-file source sets `force_parser`**, which runs
+  the `usnjrnl` parser against every file. That is why the worker passes `!filestat,!usnjrnl` rather
+  than `!filestat`. Any `--parsers` on an image also switches off plaso's per-OS preset selection.
+- **A single top-level `.zip`, tar or compressed stream is always traversed**; `--archives`
+  (default `none`) governs only archives *nested inside* the source. No `fs:stat` event is emitted
+  for an image or zip container itself, only for what is inside it.
 - An EVTX record becomes **two** events (`Creation Time`, `Content Modification Time`). plaso's
-  `test_data/evtx/System.evtx` holds 5,009 records and indexes as 10,021 events (2 × 5,009 + 3).
+  `test_data/evtx/System.evtx` holds 5,009 records and indexes as 10,021 events (2 × 5,009 + 3) — **10,018 once A15 is deployed**.
 
 ### Timesketch
 

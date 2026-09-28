@@ -188,6 +188,10 @@ from memory.
   are among the most valuable events plaso produces. *Success condition:* parser selection per
   route (single files without `filestat`, images with it) argued as an amendment to D4, and
   check 10 re-run.
+  **Fixed in code, not yet re-run** (amendment A15): the worker excludes `filestat` when dfvfs
+  classifies the source as a plain file, and keeps it for images and archives. It turned out not to
+  amend D4 — the selection is inside the plaso route. Check 10 stays open until the re-run; check 6's
+  expected count drops from 10,021 to 10,018.
 - **No supported re-drive of a `failed` row.** `failed` is terminal by design (the claim accepts
   only `recorded` or a stale `timelining`), so an artifact whose failure has been fixed stays
   un-timelined. This run re-drove by a conditional `failed` to `recorded` update with a custody
