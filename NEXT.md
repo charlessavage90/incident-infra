@@ -3,7 +3,7 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-25, after the Phase 3 acceptance run and the merge of PR #7.
+**Last updated:** 2026-09-28, after closing items 1 (in code) and 2 on `charlessavage90/feat-phase-4-lifecycle`.
 
 ---
 
@@ -16,8 +16,8 @@ regression tests where the property is checkable offline; `docs/acceptance/phase
 results table and the defect table. Phase 4 is specified but not started.
 
 **Phase 3 is merged to `main`** (PR #7), including all twelve acceptance fixes and this hand-off.
-There are no open PRs. PR #6 (a superseded NEXT.md) was closed unmerged; its branch
-`docs/next-after-merge` still exists on the remote and can be deleted.
+The follow-up branch `charlessavage90/feat-phase-4-lifecycle` carries the A15 worker fix and
+`irctl artifact redrive`. PR #6's stale branch `docs/next-after-merge` has been deleted.
 
 **Local-only state on the owner's machine:** `.claude/settings.local.json` (gitignored) allows
 `tofu -chdir=envs/example/{platform,images,analysis} apply` and denies `tofu destroy`, added so an
@@ -47,17 +47,16 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Open items, in dependency order
 
-1. **Finding 13 — plaso's `filestat` events.** Every plaso timeline carries three `fs:stat` events
-   of the worker's scratch copy, stamped with processing time; they read as incident activity and
-   make §4.3's zero-events flag unreachable on the plaso route. Excluding `filestat` wholesale is
-   wrong, because inside a disk image it produces the file-system timestamps. *Success
-   condition:* per-route parser selection (single files without `filestat`, images with it) argued
-   as an amendment to D4, and check 10 re-run.
-2. **A re-drive path for `failed` rows.** `failed` is terminal by design; this run re-drove by a
-   conditional `failed → recorded` update plus a custody note, four times — the exact command is
-   under *Operating the pipeline* in `CLAUDE.md`. *Success condition:* an
-   `irctl` re-drive command, or the procedure in an operator runbook. Natural to fold into the
-   Phase 4 `irctl` work alongside item 5.
+1. **Deploy A15 and re-run check 10.** The `filestat` fix is built, unit-tested, and its
+   classification checked against a local dfvfs 20260924 — but it is **not deployed**. Changing the
+   worker is three steps (`CLAUDE.md`, *Operating the pipeline*): apply `images`, run the mirror,
+   re-apply `analysis`. *Success condition:* with the environment active, a 1 MB random blob
+   reaches `needs_triage`, and `sample.evtx` indexes **10,018** events rather than 10,021. Needs
+   the environment active, so it costs money — batch it with the defect 4 verification gap below,
+   which needs the same cycle.
+2. ~~Re-drive path for `failed` rows~~ — **done**: `irctl artifact redrive <sha256> --case CASE
+   --reason "..."` (needs `IR_ARTIFACTS_TABLE`). Verified offline only; its first real use is also
+   its acceptance.
 3. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
    failure this run notified nobody. Configuration, not code — but a silent failure path is the
    thing this design keeps paying to avoid.
