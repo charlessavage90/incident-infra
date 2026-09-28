@@ -3,7 +3,7 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-25, after the Phase 3 acceptance run and the merge of PR #7.
+**Last updated:** 2026-09-28, after the check 10 re-run on `charlessavage90/feat-phase-4-lifecycle` (PR #8).
 
 ---
 
@@ -16,8 +16,8 @@ regression tests where the property is checkable offline; `docs/acceptance/phase
 results table and the defect table. Phase 4 is specified but not started.
 
 **Phase 3 is merged to `main`** (PR #7), including all twelve acceptance fixes and this hand-off.
-There are no open PRs. PR #6 (a superseded NEXT.md) was closed unmerged; its branch
-`docs/next-after-merge` still exists on the remote and can be deleted.
+The follow-up branch `charlessavage90/feat-phase-4-lifecycle` carries the A15 worker fix and
+`irctl artifact redrive`. PR #6's stale branch `docs/next-after-merge` has been deleted.
 
 **Local-only state on the owner's machine:** `.claude/settings.local.json` (gitignored) allows
 `tofu -chdir=envs/example/{platform,images,analysis} apply` and denies `tofu destroy`, added so an
@@ -30,12 +30,12 @@ appliance replaced several times during the run on the same data volume.
 
 **Test data left in place, on purpose until the owner decides:**
 
-- Cases `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` in the cases table, and six manifest
-  rows across them.
+- Cases `CASE-TEST-003` to `CASE-TEST-006` in the cases table, and eight manifest rows across
+  them (`CASE-TEST-006` is the 2026-09-28 check 10 re-run: a random blob and `sample.evtx`).
 - Their evidence objects, **all under legal hold in GOVERNANCE mode**, including a 5.5 GiB
   zero-filled `CASE-TEST-005/large.bin` from check 9 — the one worth removing, as the only material
   storage cost. The matching `.plaso` files are in the plaso bucket (no hold).
-- Timesketch sketches `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` and `acceptance-probe`
+- Timesketch sketches `CASE-TEST-003` to `CASE-TEST-006` and `acceptance-probe`
   (a scratch sketch from diagnosing defect 9), alongside Phase 1's `acceptance-check`.
 - Teardown follows `docs/acceptance/phase-3.md`: release each legal hold, then delete **by version**.
 
@@ -47,20 +47,17 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Open items, in dependency order
 
-1. **Finding 13 — plaso's `filestat` events.** Every plaso timeline carries three `fs:stat` events
-   of the worker's scratch copy, stamped with processing time; they read as incident activity and
-   make §4.3's zero-events flag unreachable on the plaso route. Excluding `filestat` wholesale is
-   wrong, because inside a disk image it produces the file-system timestamps. *Success
-   condition:* per-route parser selection (single files without `filestat`, images with it) argued
-   as an amendment to D4, and check 10 re-run.
-2. **A re-drive path for `failed` rows.** `failed` is terminal by design; this run re-drove by a
-   conditional `failed → recorded` update plus a custody note, four times — the exact command is
-   under *Operating the pipeline* in `CLAUDE.md`. *Success condition:* an
-   `irctl` re-drive command, or the procedure in an operator runbook. Natural to fold into the
-   Phase 4 `irctl` work alongside item 5.
-3. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
-   failure this run notified nobody. Configuration, not code — but a silent failure path is the
-   thing this design keeps paying to avoid.
+1. ~~Finding 13~~ — **closed.** A15 deployed; check 10 re-run passed on 2026-09-28 after it found
+   defects 13 (Timesketch fails a zero-event `.plaso` import) and 14 (`.pytest_cache` shipped in
+   every Lambda zip). Both fixed, deployed, and verified live. Environment returned to dormant.
+2. ~~Re-drive path for `failed` rows~~ — **closed**: `irctl artifact redrive`, used for real in
+   the re-run (it re-drove the blob, and refused an already-timelined row).
+3. **Pipeline notifications: subscribed, awaiting API confirmation.** `pipeline_notification_emails`
+   is set on the apply command line (there is no tfvars). The first subscription was confirmed and
+   then unsubscribed within seconds by something following the email's unauthenticated
+   unsubscribe link; it has been recreated. *Success condition:* confirmed via `aws sns
+   confirm-subscription ... --authenticate-on-unsubscribe true` using the token from the email
+   (procedure in `CLAUDE.md`), and `list-subscriptions-by-topic` shows an ARN, not `Pending`.
 4. **Tear down the test data** above, or decide to keep it. At minimum the 5.5 GiB object.
 5. **`irctl` has no `posture` subcommand**, which spec §7 promises. Decide whether §7's CLI
    surface is still the intent before Phase 4 builds `case close`.
@@ -71,7 +68,8 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 8. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
    attribution.
 
-**One verification gap from the run.** Defect 4's fix (retrying cloud-init's endpoint calls) was
+**One verification gap from the run, still open.** The 2026-09-28 cycle did not replace the
+appliance, so it could not test this. Defect 4's fix (retrying cloud-init's endpoint calls) was
 re-verified only on its provisioning half. The race it fixes needs interface endpoints and a
 replacement appliance created in the same apply, which no later apply reproduced. The next
 dormant→active cycle that also replaces the appliance is the test; read

@@ -133,11 +133,11 @@ regression test wherever the property is checkable offline.
 | 3 | Pass | Appliance and worker both `plaso - log2timeline version 20260512` |
 | 4 | Pass (after defects 2, 3) | 11 interface endpoints `available`; compute environment `ENABLED`/`VALID` |
 | 5 | Pass | Backing services `healthy` ~21 s before web and worker start; `restarts=0` on all five; no connection errors. Held again on a stop/start reactivation. **Closes the item NEXT.md carried since Phase 1** |
-| 6 | Pass (after defects 4-6, 8-12) | Upload to `timelined` in **34 s** with no manual step (the section 9 gate). `sample.evtx` is plaso's own `test_data/evtx/System.evtx`, 5,009 records per plaso's parser test, and indexed as **10,021 events**: 2 per record (`Creation Time`, `Content Modification Time`) + 3 `fs:stat` (finding 13) |
+| 6 | Pass (after defects 4-6, 8-12) | Upload to `timelined` in **34 s** with no manual step (the section 9 gate). `sample.evtx` is plaso's own `test_data/evtx/System.evtx`, 5,009 records per plaso's parser test, and indexed as **10,021 events**: 2 per record (`Creation Time`, `Content Modification Time`) + 3 `fs:stat` (finding 13). **Re-run 2026-09-28 with A15 deployed** (case `CASE-TEST-006`, same SHA-256): **10,018 events**, exactly the three `fs:stat` fewer |
 | 7 | Pass | CSV went `import-*` only, no `timeline-*`; `timelined`, 2 events |
 | 8 | Pass | Uploaded while dormant: `recorded`, legal hold `ON`, no execution. On reactivation the sweep had it `timelining` before the apply returned; `timelined` 4 min after active |
 | 9 | Pass, **measured** | 5.5 GiB (multipart copy path, 704 parts) filed in **10.17 s** at 2,048 MB configured / 116 MB used, about 554 MiB/s. Linear extrapolation to the 900 s timeout: **~480 GiB**. One measurement; treat it as an order of magnitude |
-| 10 | **Fail, on premise** | 1 MB of random bytes reached `timelined` with **3 events**, not `needs_triage`. The three are `fs:stat` records of the worker's own scratch copy. See finding 13 |
+| 10 | **Pass on re-run** (2026-09-28, after A15 and defect 13) | First run: 1 MB of random bytes reached `timelined` with **3 events**, all `fs:stat` records of the worker's scratch copy (finding 13). Re-run with A15 deployed: the `.plaso` held 0 events and the import **failed** (defect 13). With that fixed and the row re-driven by `irctl artifact redrive`, it reached `needs_triage` with `event_count` 0; the custody chain reads received → held → failed → re-driven (naming the operator's ARN) → flagged |
 | 11 | Pass | A hand-started duplicate execution with identical input ended `Claimed` then `AlreadyHandled`; one timeline, one datasource |
 | 12 | Pass, by natural failure | Terminating a job was not needed: four real failures took the same `States.TaskFailed` catch. Row `failed`, SNS publish succeeded, evidence object intact with matching SHA-256 and legal hold `ON` |
 | 13 | Pass | IAM policy simulator as the worker role against the live bucket policy: `DeleteObject` **explicitDeny** (bucket policy); `DeleteObjectVersion`, `PutObjectLegalHold`, `PutObjectRetention`, `BypassGovernanceRetention`, `PutObject` **implicitDeny** (role); `GetObject` allowed |
@@ -160,6 +160,8 @@ regression test wherever the property is checkable offline.
 | 10 | Found in the same replay: upload returns while the datasource is `queueing` with 0 events, and the worker counted immediately, so every artifact would have been flagged `needs_triage` | Poll until the datasource reads `ready`; raise on `fail` with Timesketch's reason; bounded at 6 h, half the job timeout |
 | 11 | Every `.plaso` import failed in psort: `No such OpenSearch mappings file: /etc/timesketch/plaso.mappings`. cloud-init wrote `timesketch.conf` but none of the data files it names, and CSV imports never read them | Data files copied at boot from the **same digest-pinned image** (`cp -n` keeps our conf). That pushed user data past EC2's 16 KB limit, which the provider caught at plan, so user data is now `base64gzip`'d, with a test at 75% of the limit |
 | 12 | Re-importing to a same-named timeline **appends** a datasource. Every retry duplicated the events (one timeline held 10,021 events four times over), `event_count` summed them, and a stale `fail` sank later clean attempts | Import is idempotent, reusing a finished import of the same file, and waiting and counting read only the datasource this upload created |
+| 13 | Found re-running check 10 with A15 deployed. Timesketch **fails** a `.plaso` import whose pinfo total is 0 (`run_plaso`: *"Not able to get total event count from Plaso file."*), so a zero-event artifact went to `failed`, and §4.3's fallback was still unreachable | The import command counts events with the same pinfo call, from the same plaso, and at zero records `event_count` 0 without uploading; the state machine already routes `"0"` to `needs_triage`. Count verified in the pinned image: 0 and 10,018 |
+| 14 | Found in the same re-run's plan. The deployed claim, sweep and intake Lambdas all carried a `.pytest_cache/` directory: `archive_file` excluded `__pycache__` but not the pytest cache, so running the tests before an apply shipped it | `.pytest_cache` added to both `excludes`; all three redeployed zips hold only `handler.py` |
 
 **The pattern held a third time, and widened.** Phase 2's three defects were authorisation failures
 `mock_provider` cannot see. Phase 3 has four of those (1, 2, 5, and the timing in 4), but eight are
@@ -188,11 +190,18 @@ from memory.
   are among the most valuable events plaso produces. *Success condition:* parser selection per
   route (single files without `filestat`, images with it) argued as an amendment to D4, and
   check 10 re-run.
+  **Fixed in code, not yet re-run** (amendment A15): the worker excludes `filestat` when dfvfs
+  classifies the source as a plain file, and keeps it for images and archives. It turned out not to
+  amend D4 — the selection is inside the plaso route. Check 10 stays open until the re-run; check 6's
+  expected count drops from 10,021 to 10,018. **Re-run 2026-09-28: check 10 passes, check 6 reads 10,018**
+  — after defect 13, which the re-run found.
 - **No supported re-drive of a `failed` row.** `failed` is terminal by design (the claim accepts
   only `recorded` or a stale `timelining`), so an artifact whose failure has been fixed stays
   un-timelined. This run re-drove by a conditional `failed` to `recorded` update with a custody
   note. *Success condition:* an `irctl` re-drive command, or that procedure written into an
   operator runbook.
+  **Closed** by `irctl artifact redrive`, which performs that update and names the caller's ARN
+  in the custody note.
 - **Failure notifications reach nobody in the example environment.** `pipeline_notification_emails`
   defaults to `[]`, the topic has no subscribers, and every failure this run published to an empty
   topic. Set it before real use.

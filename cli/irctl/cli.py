@@ -4,6 +4,7 @@ Configuration comes from the environment so the CLI has no state of its own:
 
     IR_INTAKE_BUCKET   from `tofu output -raw intake_bucket`
     IR_CASES_TABLE     from `tofu output -raw cases_table`
+    IR_ARTIFACTS_TABLE from `tofu output -raw artifacts_table`  (artifact redrive)
     IR_RETENTION_YEARS from `tofu output -raw retention_years`  (optional, default 3)
     AWS_REGION         standard
 """
@@ -15,6 +16,7 @@ import sys
 
 import boto3
 
+from .artifacts import NotFailedError, redrive
 from .cases import CaseExistsError, open_case
 from .upload import upload_artifact
 
@@ -23,6 +25,7 @@ from .upload import upload_artifact
 _ENV_SOURCE = {
     "IR_INTAKE_BUCKET": "intake_bucket",
     "IR_CASES_TABLE": "cases_table",
+    "IR_ARTIFACTS_TABLE": "artifacts_table",
 }
 
 
@@ -88,6 +91,31 @@ def _cmd_upload(args):
     return 0
 
 
+def _cmd_artifact_redrive(args):
+    ddb = boto3.client("dynamodb")
+    # The caller's own ARN, not a name they type: a custody note naming the
+    # operator is only worth writing if the operator cannot choose it.
+    operator = boto3.client("sts").get_caller_identity()["Arn"]
+    try:
+        event = redrive(
+            ddb,
+            _require_env("IR_ARTIFACTS_TABLE"),
+            args.case,
+            args.sha256,
+            args.reason,
+            operator,
+        )
+    except (NotFailedError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(event)
+    print(
+        "\nReturned to `recorded`. The sweep claims it on its next run while the "
+        "environment is active; invoke <prefix>-pipeline-sweep to run it now.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="irctl", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -116,6 +144,17 @@ def main(argv=None):
     upload.add_argument("--case", required=True)
     upload.add_argument("--source", help="where the artifact came from, for custody")
     upload.set_defaults(func=_cmd_upload)
+
+    artifact = sub.add_parser("artifact", help="operator actions on recorded artifacts")
+    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
+
+    redrive_cmd = artifact_sub.add_parser(
+        "redrive", help="return a failed artifact to the pipeline once its cause is fixed"
+    )
+    redrive_cmd.add_argument("sha256")
+    redrive_cmd.add_argument("--case", required=True)
+    redrive_cmd.add_argument("--reason", required=True, help="written to the chain of custody")
+    redrive_cmd.set_defaults(func=_cmd_artifact_redrive)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -32,13 +32,15 @@ changing anything structural:
   defects its first real run exposed
 
 Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account. Phase 3
-passed 14 of 15 checks; **check 10 fails on its premise** (finding 13 in the acceptance doc — plaso's
-`filestat` events), which is deferred with a success condition rather than fixed. Phase 4
+passed 14 of 15 checks on its first run; **check 10 failed on its premise** (finding 13 — plaso's
+`filestat` events). Amendment A15 fixed it, and the 2026-09-28 re-run passed check 10 — after
+finding two more defects (13, 14), so Phase 3's count is **fourteen**. Phase 4
 (lifecycle) is specified but not built.
 
 **Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
 Phase 1's acceptance run found six defects in code that looked finished; Phase 2's found three,
-all of them authorisation failures that `mock_provider` cannot see; Phase 3's found **twelve**. Four
+all of them authorisation failures that `mock_provider` cannot see; Phase 3's found **twelve**, and
+its check 10 re-run two more. Four
 were authorisation or timing failures of the same kind. Eight were **contract failures against
 Timesketch** — what its image contains, how it issues a CSRF token, which upload fields it
 requires, that it indexes asynchronously — and every Python test was green throughout, because the
@@ -46,13 +48,13 @@ fakes encoded the same wrong beliefs as the code. **A fake is only as good as th
 it:** where a worker test now pins upstream behaviour, its fixture was captured from the appliance.
 Assume the next phase behaves the same way.
 
-The design document carries an **§12 Amendments** table. Fourteen corrections have been made in
+The design document carries an **§12 Amendments** table. Fifteen corrections have been made in
 place rather than in a parallel errata file; read §12 before trusting a remembered reading of that
 document. A1, A3, A4, A7, A8, A10, A11, A12 and A14 changed load-bearing behaviour. A2's open half —
 the dropped compose healthchecks — is now fixed. A9 replaces D14's *reasoning* without changing its
 conclusion, and A10 **withdraws** something §5.5 previously promised, so a remembered reading of
-either is likely to be wrong. **A13 is an open gap, not a settled change:** §4.3's zero-events
-fallback cannot fire on the plaso route as built.
+either is likely to be wrong. A13 recorded that §4.3's zero-events fallback could not fire on the
+plaso route; **A15 resolves it** by parser selection on plaso's own source type, without amending D4.
 
 ## Commands
 
@@ -100,10 +102,10 @@ python -m venv .venv                                  # .venv/ is gitignored
 ./.venv/Scripts/python.exe -m pip install -e "cli[dev]"
 ./.venv/Scripts/python.exe -m pip install boto3 pytest
 
-cd cli && python -m pytest tests -v                                     # irctl, 16
+cd cli && python -m pytest tests -v                                     # irctl, 21
 cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
 cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
-cd containers/plaso-worker && python -m pytest -v                       # worker, 33
+cd containers/plaso-worker && python -m pytest -v                       # worker, 43
 ```
 
 The worker suite needs `requests` as well as `boto3` and `pytest`; see
@@ -117,10 +119,10 @@ The worker suite needs `requests` as well as `boto3` and `pytest`; see
 | `modules/platform` | 52 run blocks |
 | `modules/images` | 12 |
 | `modules/analysis` | 45 |
-| `cli` | 16 tests |
+| `cli` | 21 tests |
 | `modules/platform/lambda/intake` | 8 tests |
 | `modules/analysis/lambda/pipeline` | 20 tests |
-| `containers/plaso-worker` | 33 tests |
+| `containers/plaso-worker` | 43 tests |
 
 **Posture toggle** (applies real infrastructure, costs money):
 
@@ -474,9 +476,16 @@ All verified against upstream sources during design; each shaped a decision.
   worker's scratch copy, stamped with processing time. So no single file ever yields zero events,
   and every plaso timeline carries three events an analyst can mistake for incident activity
   (Phase 3 finding 13). Excluding `filestat` wholesale is wrong: inside a disk image it is what
-  produces the file-system timestamps.
+  produces the file-system timestamps, and inside a zip the member timestamps. The worker therefore
+  excludes it only when dfvfs classifies the source as a plain `file` (A15).
+- **`--parsers` with exactly one element on a single-file source sets `force_parser`**, which runs
+  the `usnjrnl` parser against every file. That is why the worker passes `!filestat,!usnjrnl` rather
+  than `!filestat`. Any `--parsers` on an image also switches off plaso's per-OS preset selection.
+- **A single top-level `.zip`, tar or compressed stream is always traversed**; `--archives`
+  (default `none`) governs only archives *nested inside* the source. No `fs:stat` event is emitted
+  for an image or zip container itself, only for what is inside it.
 - An EVTX record becomes **two** events (`Creation Time`, `Content Modification Time`). plaso's
-  `test_data/evtx/System.evtx` holds 5,009 records and indexes as 10,021 events (2 × 5,009 + 3).
+  `test_data/evtx/System.evtx` holds 5,009 records and indexed as 10,021 events (2 × 5,009 + 3) before A15, and **10,018** since.
 
 ### Timesketch
 
@@ -501,6 +510,9 @@ All verified against upstream sources during design; each shaped a decision.
   meta tag. The only cookie `GET /login/` sets is `session`.
 - **`POST /api/v1/upload/` requires `total_file_size`.** It defaults to 0 and 0 is rejected as
   *"File is empty"*, whatever the file holds.
+- **A `.plaso` with zero events fails import**, it does not make an empty timeline: `run_plaso`
+  raises *"Not able to get total event count from Plaso file."* when pinfo's total is falsy. The
+  worker counts first, with the same pinfo call, and records zero instead of uploading.
 - **Upload returns before indexing.** The new datasource reads `queueing` with 0 events; `ready` or
   `fail` comes later, from the `timesketch-worker` container.
 - **Uploading to an existing timeline name appends a datasource**; it does not replace. Repeated
@@ -614,6 +626,20 @@ Development does not need a dedicated IR account; nothing in phases 1–4 requir
 
 Procedures the Phase 3 acceptance run depended on. None is automated yet.
 
+- **Applying from a worktree:** local state lives only in the owner's main checkout
+  (`git worktree list` names it), under `envs/example/*/terraform.tfstate`. Pass `-state=<that path>` to both
+  `plan` and `apply`; `-backend-config=path=` at init did not take. `terraform_remote_state` reads
+  a hardcoded `../platform/terraform.tfstate`, so `images` and `analysis` also need a *read-only*
+  copy of the platform state beside them for the plan — delete it afterwards. A plan that proposes
+  creating everything means the state was not found; stop there.
+- **No `*.tfvars` exists**, so every apply must repeat `-var='responders=["alice"]'`,
+  `pipeline_notification_emails` and (platform) `budget_alert_emails`. Leaving
+  `pipeline_notification_emails` off an apply **destroys the subscription**.
+- **Email subscriptions: confirm through the API, not the link.** Clicking the confirmation link
+  leaves an unauthenticated unsubscribe link live, and on 2026-09-28 something followed it seconds
+  after confirmation. Copy the link's `Token=` and run `aws sns confirm-subscription --topic-arn
+  <arn> --token <token> --authenticate-on-unsubscribe true`. OpenTofu does not notice an
+  unsubscribed subscription; recreate it with `-replace`.
 - **Apply reviewed saved plans, never `-auto-approve`.** `tofu -chdir=envs/example/<layer> plan
   -out=tfplan`, read it, then `tofu -chdir=... apply tfplan`. Claude Code's auto mode refuses a
   blind apply, and a saved plan is what makes a replacement (the appliance's `user_data`, the
@@ -626,18 +652,10 @@ Procedures the Phase 3 acceptance run depended on. None is automated yet.
   digest from SSM at *apply* time, so a rebuilt image does nothing until a new job definition
   revision is registered. Confirm with `aws batch describe-job-definitions --job-definition-name
   <prefix>-plaso-worker --status ACTIVE`.
-- **Re-driving a `failed` row** (no command exists yet — NEXT.md): a conditional update back to
-  `recorded`, appending to `custody` so the chain of custody records the operator action, then let
-  the sweep take it:
-
-  ```bash
-  aws dynamodb update-item --table-name <prefix>-artifacts \
-    --key '{"case_id":{"S":"CASE"},"sha256":{"S":"HASH"}}' \
-    --update-expression 'SET #s = :r, custody = list_append(custody, :n)' \
-    --condition-expression '#s = :f' --expression-attribute-names '{"#s":"status"}' \
-    --expression-attribute-values '{":r":{"S":"recorded"},":f":{"S":"failed"},":n":{"L":[{"S":"<utc> re-driven by operator: <why>"}]}}'
-  ```
-
+- **Re-driving a `failed` row** once its cause is fixed: `irctl artifact redrive <sha256> --case
+  CASE --reason "<why>"` (needs `IR_ARTIFACTS_TABLE`). It is a conditional `failed → recorded`
+  update that appends a custody note naming the caller's ARN and the reason; the sweep claims it
+  from there. Any state other than `failed` is refused, because it is queued, in flight or done.
 - **The sweep can be run on demand** rather than waiting `sweep_interval_minutes`:
   `aws lambda invoke --function-name <prefix>-pipeline-sweep --payload '{}' out.json`. It runs the
   same code the schedule does and returns `{"started": N}`.
