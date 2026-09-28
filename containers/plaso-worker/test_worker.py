@@ -218,3 +218,80 @@ def test_a_key_that_resolves_outside_the_scratch_directory_is_refused(tmp_path, 
     be well formed."""
     with pytest.raises(worker.WorkerError):
         worker.safe_local_path(str(tmp_path), key)
+
+
+def _import_args(bucket_kind="plaso"):
+    return worker.build_parser().parse_args(
+        ["import", "--case-id", "CASE-1", "--sha256", "abc",
+         "--key", "CASE-1/abc.plaso", "--bucket-kind", bucket_kind]
+    )
+
+
+@pytest.fixture
+def import_env(monkeypatch, tmp_path):
+    for name, value in {
+        "PLASO_BUCKET": "ir-plaso", "EVIDENCE_BUCKET": "ir-evidence",
+        "SCRATCH_DIR": str(tmp_path), "ARTIFACTS_TABLE": "ir-artifacts",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(worker, "download", lambda bucket, key, dest: dest)
+    calls = []
+    monkeypatch.setattr(worker, "record_empty", lambda c, s: calls.append(("empty", c, s)))
+    monkeypatch.setattr(worker, "record_timeline", lambda *a: calls.append(("timeline",) + a))
+
+    def no_timesketch():
+        raise AssertionError("Timesketch must not be contacted")
+
+    monkeypatch.setattr(worker, "_timesketch", no_timesketch)
+    return calls
+
+
+def test_a_zero_event_plaso_is_recorded_empty_and_never_uploaded(monkeypatch, import_env):
+    """Timesketch fails an import whose pinfo total is 0 ("Not able to get total
+    event count from Plaso file."), so uploading it would turn spec 4.3's
+    needs_triage into `failed`. Captured from the appliance during the A15
+    re-run of acceptance check 10."""
+    monkeypatch.setattr(worker, "plaso_event_count", lambda path: 0)
+
+    assert worker.cmd_import(_import_args()) == 0
+    assert import_env == [("empty", "CASE-1", "abc")]
+
+
+def test_an_uncountable_plaso_is_left_for_timesketch_to_judge(monkeypatch, import_env):
+    def boom(path):
+        raise RuntimeError("unsupported storage format")
+
+    monkeypatch.setattr(worker, "plaso_event_count", boom)
+    with pytest.raises(AssertionError, match="Timesketch must not be contacted"):
+        worker.cmd_import(_import_args())
+
+
+def test_a_direct_import_is_never_counted_as_plaso(monkeypatch, import_env):
+    def must_not_count(path):
+        raise AssertionError("a CSV is not a .plaso")
+
+    monkeypatch.setattr(worker, "plaso_event_count", must_not_count)
+    with pytest.raises(AssertionError, match="Timesketch must not be contacted"):
+        worker.cmd_import(_import_args("evidence"))
+
+
+def test_record_empty_writes_only_the_event_count(monkeypatch):
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    stub = Stubber(ddb)
+    stub.add_response(
+        "update_item",
+        {},
+        {
+            "TableName": "ir-artifacts",
+            "Key": {"case_id": {"S": "CASE-1"}, "sha256": {"S": "abc"}},
+            "UpdateExpression": "SET event_count = :c",
+            "ExpressionAttributeValues": {":c": {"N": "0"}},
+        },
+    )
+    stub.activate()
+    monkeypatch.setitem(worker._CLIENTS, "dynamodb", ddb)
+    monkeypatch.setenv("ARTIFACTS_TABLE", "ir-artifacts")
+
+    worker.record_empty("CASE-1", "abc")
+
+    stub.assert_no_pending_responses()

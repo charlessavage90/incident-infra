@@ -211,6 +211,51 @@ def record_timeline(case_id, sha256, timeline_id, event_count):
     )
 
 
+def record_empty(case_id, sha256):
+    """Record a zero-event result without a timeline.
+
+    The state machine reads event_count back and routes "0" to needs_triage
+    (spec 4.3). timeline_id is left unset because no timeline exists.
+    """
+    _client("dynamodb").update_item(
+        TableName=_config("ARTIFACTS_TABLE"),
+        Key={"case_id": {"S": case_id}, "sha256": {"S": sha256}},
+        UpdateExpression="SET event_count = :c",
+        ExpressionAttributeValues={":c": {"N": "0"}},
+    )
+
+
+def plaso_event_count(path):
+    """Count a .plaso's events the way Timesketch's run_plaso does.
+
+    Timesketch refuses an import whose pinfo total is falsy -- "Not able to get
+    total event count from Plaso file." -- so a zero-event .plaso is a FAILED
+    import, not an empty timeline, and spec 4.3's fallback could never fire
+    (finding 13's second half). This is the same pinfo call from the same plaso,
+    since this image is FROM the Timesketch image; it exists only there, hence
+    the local import.
+    """
+    from plaso.cli import pinfo_tool
+
+    pinfo = pinfo_tool.PinfoTool()
+    reader = pinfo._GetStorageReader(path)  # pylint: disable=protected-access
+    try:
+        counters = pinfo._CalculateStorageCounters(reader)  # pylint: disable=protected-access
+    finally:
+        reader.Close()
+    return counters.get("parsers", {}).get("total") or 0
+
+
+def _is_empty_plaso(path):
+    """True only when the count positively says zero. A count that cannot be
+    taken leaves the decision to Timesketch, whose failure is at least loud."""
+    try:
+        return plaso_event_count(path) == 0
+    except Exception as exc:  # plaso raises its own error types
+        log.warning("could not count events in %s (%s); importing anyway", path, exc)
+        return False
+
+
 def _timesketch():
     secret = _client("secretsmanager").get_secret_value(
         SecretId=_config("TIMESKETCH_SECRET_ID")
@@ -241,6 +286,10 @@ def cmd_import(args):
 
     with tempfile.TemporaryDirectory(dir=scratch) as workdir:
         local = download(bucket, args.key, safe_local_path(workdir, args.key))
+        if args.bucket_kind == "plaso" and _is_empty_plaso(local):
+            record_empty(args.case_id, args.sha256)
+            log.info("%s holds no events; not importing, flagged for triage", args.key)
+            return 0
         client = _timesketch()
         sketch_id = client.resolve_sketch(args.case_id)
         name = timeline_name(args.key)
