@@ -32,14 +32,15 @@ changing anything structural:
   defects its first real run exposed
 
 Phases 1, 2 and 3 are built and have had their acceptance runs against a real AWS account. Phase 3
-passed 14 of 15 checks; **check 10 failed on its premise** (finding 13 in the acceptance doc — plaso's
-`filestat` events). The fix (amendment A15) is built and unit-tested but **not yet deployed or
-re-run against the account**, so check 10 is still open. Phase 4
+passed 14 of 15 checks on its first run; **check 10 failed on its premise** (finding 13 — plaso's
+`filestat` events). Amendment A15 fixed it, and the 2026-09-28 re-run passed check 10 — after
+finding two more defects (13, 14), so Phase 3's count is **fourteen**. Phase 4
 (lifecycle) is specified but not built.
 
 **Every test in this repository is offline, so "CI-green" and "works" remain different claims.**
 Phase 1's acceptance run found six defects in code that looked finished; Phase 2's found three,
-all of them authorisation failures that `mock_provider` cannot see; Phase 3's found **twelve**. Four
+all of them authorisation failures that `mock_provider` cannot see; Phase 3's found **twelve**, and
+its check 10 re-run two more. Four
 were authorisation or timing failures of the same kind. Eight were **contract failures against
 Timesketch** — what its image contains, how it issues a CSRF token, which upload fields it
 requires, that it indexes asynchronously — and every Python test was green throughout, because the
@@ -104,7 +105,7 @@ python -m venv .venv                                  # .venv/ is gitignored
 cd cli && python -m pytest tests -v                                     # irctl, 21
 cd modules/platform/lambda/intake && python -m pytest -v                # recorder, 8
 cd modules/analysis/lambda/pipeline && python -m pytest -v              # claim/sweep, 20
-cd containers/plaso-worker && python -m pytest -v                       # worker, 39
+cd containers/plaso-worker && python -m pytest -v                       # worker, 43
 ```
 
 The worker suite needs `requests` as well as `boto3` and `pytest`; see
@@ -121,7 +122,7 @@ The worker suite needs `requests` as well as `boto3` and `pytest`; see
 | `cli` | 21 tests |
 | `modules/platform/lambda/intake` | 8 tests |
 | `modules/analysis/lambda/pipeline` | 20 tests |
-| `containers/plaso-worker` | 39 tests |
+| `containers/plaso-worker` | 43 tests |
 
 **Posture toggle** (applies real infrastructure, costs money):
 
@@ -484,7 +485,7 @@ All verified against upstream sources during design; each shaped a decision.
   (default `none`) governs only archives *nested inside* the source. No `fs:stat` event is emitted
   for an image or zip container itself, only for what is inside it.
 - An EVTX record becomes **two** events (`Creation Time`, `Content Modification Time`). plaso's
-  `test_data/evtx/System.evtx` holds 5,009 records and indexes as 10,021 events (2 × 5,009 + 3) — **10,018 once A15 is deployed**.
+  `test_data/evtx/System.evtx` holds 5,009 records and indexed as 10,021 events (2 × 5,009 + 3) before A15, and **10,018** since.
 
 ### Timesketch
 
@@ -509,6 +510,9 @@ All verified against upstream sources during design; each shaped a decision.
   meta tag. The only cookie `GET /login/` sets is `session`.
 - **`POST /api/v1/upload/` requires `total_file_size`.** It defaults to 0 and 0 is rejected as
   *"File is empty"*, whatever the file holds.
+- **A `.plaso` with zero events fails import**, it does not make an empty timeline: `run_plaso`
+  raises *"Not able to get total event count from Plaso file."* when pinfo's total is falsy. The
+  worker counts first, with the same pinfo call, and records zero instead of uploading.
 - **Upload returns before indexing.** The new datasource reads `queueing` with 0 events; `ready` or
   `fail` comes later, from the `timesketch-worker` container.
 - **Uploading to an existing timeline name appends a datasource**; it does not replace. Repeated
@@ -622,6 +626,20 @@ Development does not need a dedicated IR account; nothing in phases 1–4 requir
 
 Procedures the Phase 3 acceptance run depended on. None is automated yet.
 
+- **Applying from a worktree:** local state lives only in the owner's main checkout
+  (`git worktree list` names it), under `envs/example/*/terraform.tfstate`. Pass `-state=<that path>` to both
+  `plan` and `apply`; `-backend-config=path=` at init did not take. `terraform_remote_state` reads
+  a hardcoded `../platform/terraform.tfstate`, so `images` and `analysis` also need a *read-only*
+  copy of the platform state beside them for the plan — delete it afterwards. A plan that proposes
+  creating everything means the state was not found; stop there.
+- **No `*.tfvars` exists**, so every apply must repeat `-var='responders=["alice"]'`,
+  `pipeline_notification_emails` and (platform) `budget_alert_emails`. Leaving
+  `pipeline_notification_emails` off an apply **destroys the subscription**.
+- **Email subscriptions: confirm through the API, not the link.** Clicking the confirmation link
+  leaves an unauthenticated unsubscribe link live, and on 2026-09-28 something followed it seconds
+  after confirmation. Copy the link's `Token=` and run `aws sns confirm-subscription --topic-arn
+  <arn> --token <token> --authenticate-on-unsubscribe true`. OpenTofu does not notice an
+  unsubscribed subscription; recreate it with `-replace`.
 - **Apply reviewed saved plans, never `-auto-approve`.** `tofu -chdir=envs/example/<layer> plan
   -out=tfplan`, read it, then `tofu -chdir=... apply tfplan`. Claude Code's auto mode refuses a
   blind apply, and a saved plan is what makes a replacement (the appliance's `user_data`, the

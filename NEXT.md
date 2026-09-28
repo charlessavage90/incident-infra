@@ -3,7 +3,7 @@
 Hand-off for the next session. Durable project facts live in `CLAUDE.md`; this file is what is
 *outstanding*, and it should shrink as items close.
 
-**Last updated:** 2026-09-28, after closing items 1 (in code) and 2 on `charlessavage90/feat-phase-4-lifecycle`.
+**Last updated:** 2026-09-28, after the check 10 re-run on `charlessavage90/feat-phase-4-lifecycle` (PR #8).
 
 ---
 
@@ -30,12 +30,12 @@ appliance replaced several times during the run on the same data volume.
 
 **Test data left in place, on purpose until the owner decides:**
 
-- Cases `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` in the cases table, and six manifest
-  rows across them.
+- Cases `CASE-TEST-003` to `CASE-TEST-006` in the cases table, and eight manifest rows across
+  them (`CASE-TEST-006` is the 2026-09-28 check 10 re-run: a random blob and `sample.evtx`).
 - Their evidence objects, **all under legal hold in GOVERNANCE mode**, including a 5.5 GiB
   zero-filled `CASE-TEST-005/large.bin` from check 9 — the one worth removing, as the only material
   storage cost. The matching `.plaso` files are in the plaso bucket (no hold).
-- Timesketch sketches `CASE-TEST-003`, `CASE-TEST-004`, `CASE-TEST-005` and `acceptance-probe`
+- Timesketch sketches `CASE-TEST-003` to `CASE-TEST-006` and `acceptance-probe`
   (a scratch sketch from diagnosing defect 9), alongside Phase 1's `acceptance-check`.
 - Teardown follows `docs/acceptance/phase-3.md`: release each legal hold, then delete **by version**.
 
@@ -47,19 +47,17 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 
 ## Open items, in dependency order
 
-1. **Deploy A15 and re-run check 10.** The `filestat` fix is built, unit-tested, and its
-   classification checked against a local dfvfs 20260924 — but it is **not deployed**. Changing the
-   worker is three steps (`CLAUDE.md`, *Operating the pipeline*): apply `images`, run the mirror,
-   re-apply `analysis`. *Success condition:* with the environment active, a 1 MB random blob
-   reaches `needs_triage`, and `sample.evtx` indexes **10,018** events rather than 10,021. Needs
-   the environment active, so it costs money — batch it with the defect 4 verification gap below,
-   which needs the same cycle.
-2. ~~Re-drive path for `failed` rows~~ — **done**: `irctl artifact redrive <sha256> --case CASE
-   --reason "..."` (needs `IR_ARTIFACTS_TABLE`). Verified offline only; its first real use is also
-   its acceptance.
-3. **Set `pipeline_notification_emails`.** The pipeline topic has **no subscribers**; every
-   failure this run notified nobody. Configuration, not code — but a silent failure path is the
-   thing this design keeps paying to avoid.
+1. ~~Finding 13~~ — **closed.** A15 deployed; check 10 re-run passed on 2026-09-28 after it found
+   defects 13 (Timesketch fails a zero-event `.plaso` import) and 14 (`.pytest_cache` shipped in
+   every Lambda zip). Both fixed, deployed, and verified live. Environment returned to dormant.
+2. ~~Re-drive path for `failed` rows~~ — **closed**: `irctl artifact redrive`, used for real in
+   the re-run (it re-drove the blob, and refused an already-timelined row).
+3. **Pipeline notifications: subscribed, awaiting API confirmation.** `pipeline_notification_emails`
+   is set on the apply command line (there is no tfvars). The first subscription was confirmed and
+   then unsubscribed within seconds by something following the email's unauthenticated
+   unsubscribe link; it has been recreated. *Success condition:* confirmed via `aws sns
+   confirm-subscription ... --authenticate-on-unsubscribe true` using the token from the email
+   (procedure in `CLAUDE.md`), and `list-subscriptions-by-topic` shows an ARN, not `Pending`.
 4. **Tear down the test data** above, or decide to keep it. At minimum the 5.5 GiB object.
 5. **`irctl` has no `posture` subcommand**, which spec §7 promises. Decide whether §7's CLI
    surface is still the intent before Phase 4 builds `case close`.
@@ -70,7 +68,8 @@ under D1). Discover them with `tofu output` in `envs/example/platform` or
 8. **Phase 4** — case close, legal hold, archival, exercise mode, auto-dormancy nudge, per-case cost
    attribution.
 
-**One verification gap from the run.** Defect 4's fix (retrying cloud-init's endpoint calls) was
+**One verification gap from the run, still open.** The 2026-09-28 cycle did not replace the
+appliance, so it could not test this. Defect 4's fix (retrying cloud-init's endpoint calls) was
 re-verified only on its provisioning half. The race it fixes needs interface endpoints and a
 replacement appliance created in the same apply, which no later apply reproduced. The next
 dormant→active cycle that also replaces the appliance is the test; read
