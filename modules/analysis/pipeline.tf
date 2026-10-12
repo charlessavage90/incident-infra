@@ -19,7 +19,7 @@ data "archive_file" "pipeline" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/pipeline"
   output_path = "${path.module}/build/pipeline.zip"
-  excludes    = ["test_handler.py", "__pycache__"]
+  excludes    = ["test_handler.py", "__pycache__", ".pytest_cache"]
 }
 
 # --- Notifications (spec 4.7) ---

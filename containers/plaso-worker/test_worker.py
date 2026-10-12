@@ -115,6 +115,7 @@ def test_run_log2timeline_passes_the_storage_file_and_the_source(monkeypatch, tm
         return Result()
 
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker, "source_type", lambda path: "archive")
 
     source = str(tmp_path / "triage.zip")
     destination = str(tmp_path / "abc.plaso")
@@ -123,6 +124,62 @@ def test_run_log2timeline_passes_the_storage_file_and_the_source(monkeypatch, tm
     assert captured["argv"][0] == "log2timeline.py"
     assert captured["argv"][-1] == source
     assert destination in captured["argv"]
+    assert "--parsers" not in captured["argv"]
+
+
+def _argv_for(monkeypatch, tmp_path, kind):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return Result()
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker, "source_type", kind)
+    source = str(tmp_path / "in")
+    worker.run_log2timeline(source, str(tmp_path / "out.plaso"))
+    assert captured["argv"][-1] == source
+    return captured["argv"]
+
+
+def test_a_single_file_is_timelined_without_filestat(monkeypatch, tmp_path):
+    """Finding 13 / amendment A15. filestat on a single file stamps three
+    fs:stat events on the worker's scratch copy at processing time: noise an
+    analyst can mistake for incident activity, and the reason spec 4.3's
+    zero-events flag could never fire on the plaso route."""
+    argv = _argv_for(monkeypatch, tmp_path, lambda path: "file")
+    assert argv[argv.index("--parsers") + 1] == "!filestat,!usnjrnl"
+
+
+def test_the_single_file_expression_has_two_elements(monkeypatch, tmp_path):
+    """plaso sets force_parser when a single-file source has exactly ONE parser
+    element, and force_parser runs usnjrnl against every file. '!filestat' alone
+    would trade three noise events for a behaviour change nobody asked for."""
+    assert len(worker.SINGLE_FILE_PARSERS.split(",")) == 2
+
+
+@pytest.mark.parametrize("kind", ["storage media image", "archive", "directory"])
+def test_images_and_archives_keep_plasos_own_parser_choice(monkeypatch, tmp_path, kind):
+    """Inside an image filestat produces the file-system timestamps, and inside
+    a zip the member timestamps; nothing else does. Passing any --parsers for an
+    image would also switch off plaso's per-OS preset selection."""
+    argv = _argv_for(monkeypatch, tmp_path, lambda path: kind)
+    assert "--parsers" not in argv
+
+
+def test_a_failed_source_scan_keeps_filestat(monkeypatch, tmp_path):
+    """Three noise events are recoverable; an image's lost file-system
+    timestamps are not. So an unclassifiable source errs towards keeping them."""
+
+    def boom(path):
+        raise RuntimeError("Unable to open file entry.")
+
+    argv = _argv_for(monkeypatch, tmp_path, boom)
+    assert "--parsers" not in argv
 
 
 def test_main_returns_nonzero_rather_than_raising(monkeypatch):
@@ -161,3 +218,80 @@ def test_a_key_that_resolves_outside_the_scratch_directory_is_refused(tmp_path, 
     be well formed."""
     with pytest.raises(worker.WorkerError):
         worker.safe_local_path(str(tmp_path), key)
+
+
+def _import_args(bucket_kind="plaso"):
+    return worker.build_parser().parse_args(
+        ["import", "--case-id", "CASE-1", "--sha256", "abc",
+         "--key", "CASE-1/abc.plaso", "--bucket-kind", bucket_kind]
+    )
+
+
+@pytest.fixture
+def import_env(monkeypatch, tmp_path):
+    for name, value in {
+        "PLASO_BUCKET": "ir-plaso", "EVIDENCE_BUCKET": "ir-evidence",
+        "SCRATCH_DIR": str(tmp_path), "ARTIFACTS_TABLE": "ir-artifacts",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(worker, "download", lambda bucket, key, dest: dest)
+    calls = []
+    monkeypatch.setattr(worker, "record_empty", lambda c, s: calls.append(("empty", c, s)))
+    monkeypatch.setattr(worker, "record_timeline", lambda *a: calls.append(("timeline",) + a))
+
+    def no_timesketch():
+        raise AssertionError("Timesketch must not be contacted")
+
+    monkeypatch.setattr(worker, "_timesketch", no_timesketch)
+    return calls
+
+
+def test_a_zero_event_plaso_is_recorded_empty_and_never_uploaded(monkeypatch, import_env):
+    """Timesketch fails an import whose pinfo total is 0 ("Not able to get total
+    event count from Plaso file."), so uploading it would turn spec 4.3's
+    needs_triage into `failed`. Captured from the appliance during the A15
+    re-run of acceptance check 10."""
+    monkeypatch.setattr(worker, "plaso_event_count", lambda path: 0)
+
+    assert worker.cmd_import(_import_args()) == 0
+    assert import_env == [("empty", "CASE-1", "abc")]
+
+
+def test_an_uncountable_plaso_is_left_for_timesketch_to_judge(monkeypatch, import_env):
+    def boom(path):
+        raise RuntimeError("unsupported storage format")
+
+    monkeypatch.setattr(worker, "plaso_event_count", boom)
+    with pytest.raises(AssertionError, match="Timesketch must not be contacted"):
+        worker.cmd_import(_import_args())
+
+
+def test_a_direct_import_is_never_counted_as_plaso(monkeypatch, import_env):
+    def must_not_count(path):
+        raise AssertionError("a CSV is not a .plaso")
+
+    monkeypatch.setattr(worker, "plaso_event_count", must_not_count)
+    with pytest.raises(AssertionError, match="Timesketch must not be contacted"):
+        worker.cmd_import(_import_args("evidence"))
+
+
+def test_record_empty_writes_only_the_event_count(monkeypatch):
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    stub = Stubber(ddb)
+    stub.add_response(
+        "update_item",
+        {},
+        {
+            "TableName": "ir-artifacts",
+            "Key": {"case_id": {"S": "CASE-1"}, "sha256": {"S": "abc"}},
+            "UpdateExpression": "SET event_count = :c",
+            "ExpressionAttributeValues": {":c": {"N": "0"}},
+        },
+    )
+    stub.activate()
+    monkeypatch.setitem(worker._CLIENTS, "dynamodb", ddb)
+    monkeypatch.setenv("ARTIFACTS_TABLE", "ir-artifacts")
+
+    worker.record_empty("CASE-1", "abc")
+
+    stub.assert_no_pending_responses()

@@ -10,7 +10,7 @@ data "archive_file" "intake" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/intake"
   output_path = "${path.module}/build/intake.zip"
-  excludes    = ["test_handler.py", "__pycache__"]
+  excludes    = ["test_handler.py", "__pycache__", ".pytest_cache"]
 }
 
 resource "aws_iam_role" "intake" {
